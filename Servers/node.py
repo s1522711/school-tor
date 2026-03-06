@@ -29,6 +29,7 @@ import json
 import threading
 import base64
 import argparse
+import select
 
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES, PKCS1_OAEP
@@ -139,10 +140,17 @@ def handle_circuit_setup(conn, msg, local_circuits: set):
     if 'dest_host' in inner:
         # ── Exit node ──
         dest = (inner['dest_host'], inner['dest_port'])
+        try:
+            dest_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            dest_sock.connect(dest)
+        except Exception as e:
+            send_msg(conn, {'status': 'error', 'msg': f'Cannot reach destination: {e}'})
+            return
         with circuits_lock:
             circuits[circuit_id] = {
                 'key': relay_key,
                 'next_sock': None,
+                'dest_sock': dest_sock,
                 'dest': dest,
                 'is_exit': True,
             }
@@ -215,31 +223,34 @@ def handle_relay(conn, msg):
     dbg("after peel             ", decrypted)
 
     if circuit['is_exit']:
-        # ── Exit: deliver raw to destination server ──
-        dest_host, dest_port = circuit['dest']
+        # ── Exit: deliver via persistent destination connection ──
+        # Empty decrypted = poll (check for pushed messages without sending).
+        # Non-empty = real message; send to dest then wait for response.
+        dest_sock = circuit['dest_sock']
+
+        if decrypted:
+            dbg("plaintext to server    ", decrypted)
+            if debug:
+                print(f"  [DBG] plaintext text:              {decrypted.decode(errors='replace')!r}")
 
         try:
-            plaintext_preview = decrypted.decode(errors='replace')
-        except Exception:
-            plaintext_preview = repr(decrypted)
-        dbg("plaintext to server    ", decrypted)
-        if debug:
-            print(f"  [DBG] plaintext text:              {plaintext_preview!r}")
-
-        try:
-            dest_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            dest_sock.connect((dest_host, dest_port))
-            send_msg(dest_sock, decrypted)
-            raw_response = recv_msg(dest_sock)
-            dest_sock.close()
+            if decrypted:
+                send_msg(dest_sock, decrypted)
+            # Longer timeout for real messages (waiting for Ack); short for polls.
+            timeout = 5.0 if decrypted else 0.5
+            readable, _, _ = select.select([dest_sock], [], [], timeout)
+            if readable:
+                raw_response = recv_msg(dest_sock)
+                if raw_response is None:
+                    raw_response = b''
+            else:
+                raw_response = b''
         except Exception as e:
             raw_response = f'DELIVERY ERROR: {e}'.encode()
 
-        if raw_response is None:
-            raw_response = b'(no response from server)'
-
-        dbg("server response (raw)  ", raw_response)
-        print(f"[{node_type.upper()}] Delivered  circuit={circuit_id[:8]}")
+        if raw_response:
+            dbg("server response (raw)  ", raw_response)
+            print(f"[{node_type.upper()}] Delivered  circuit={circuit_id[:8]}")
 
         # Wrap response in one AES layer for the backward trip
         resp_enc = aes_encrypt(relay_key, raw_response)
@@ -313,11 +324,17 @@ def handle_connection(conn, addr):
         for cid in local_circuits:
             with circuits_lock:
                 circuit = circuits.pop(cid, None)
-            if circuit and circuit['next_sock']:
-                try:
-                    circuit['next_sock'].close()
-                except Exception:
-                    pass
+            if circuit:
+                if circuit['next_sock']:
+                    try:
+                        circuit['next_sock'].close()
+                    except Exception:
+                        pass
+                if circuit.get('dest_sock'):
+                    try:
+                        circuit['dest_sock'].close()
+                    except Exception:
+                        pass
         if local_circuits:
             print(f"[{node_type.upper()}] Torn down {len(local_circuits)} circuit(s) from {addr}")
 
@@ -374,12 +391,33 @@ def main():
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_sock.bind((args.host, args.port))
     server_sock.listen(20)
+    server_sock.settimeout(1.0)
     print(f"[{node_type.upper()}] Listening on {args.host}:{args.port}")
 
-    while True:
-        conn, addr = server_sock.accept()
-        t = threading.Thread(target=handle_connection, args=(conn, addr), daemon=True)
-        t.start()
+    try:
+        while True:
+            try:
+                conn, addr = server_sock.accept()
+            except socket.timeout:
+                continue
+            t = threading.Thread(target=handle_connection, args=(conn, addr), daemon=True)
+            t.start()
+    except KeyboardInterrupt:
+        print(f"\n[{node_type.upper()}] Shutting down...")
+    finally:
+        with circuits_lock:
+            for circuit in circuits.values():
+                if circuit['next_sock']:
+                    try:
+                        circuit['next_sock'].close()
+                    except Exception:
+                        pass
+                if circuit.get('dest_sock'):
+                    try:
+                        circuit['dest_sock'].close()
+                    except Exception:
+                        pass
+        server_sock.close()
 
 
 if __name__ == '__main__':

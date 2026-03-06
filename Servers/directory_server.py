@@ -74,12 +74,21 @@ def main():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen(20)
+    server.settimeout(1.0)
     print(f"[DIR] Directory server listening on {HOST}:{PORT}")
 
-    while True:
-        conn, addr = server.accept()
-        t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
-        t.start()
+    try:
+        while True:
+            try:
+                conn, addr = server.accept()
+            except socket.timeout:
+                continue
+            t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
+            t.start()
+    except KeyboardInterrupt:
+        print("\n[DIR] Shutting down...")
+    finally:
+        server.close()
 
 
 if __name__ == '__main__':

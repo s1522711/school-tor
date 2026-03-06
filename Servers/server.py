@@ -63,12 +63,21 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((args.host, args.port))
     srv.listen(10)
+    srv.settimeout(1.0)
     print(f"[SERVER] Listening on {args.host}:{args.port}  (plaintext / no AES)")
 
-    while True:
-        conn, addr = srv.accept()
-        t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
-        t.start()
+    try:
+        while True:
+            try:
+                conn, addr = srv.accept()
+            except socket.timeout:
+                continue
+            t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
+            t.start()
+    except KeyboardInterrupt:
+        print("\n[SERVER] Shutting down...")
+    finally:
+        srv.close()
 
 
 if __name__ == '__main__':

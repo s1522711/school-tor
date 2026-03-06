@@ -28,9 +28,9 @@ cleanup() {
     echo ""
     echo "Stopping all components..."
     pkill -f "python Servers/directory_server.py" 2>/dev/null || true
-    pkill -f "python Servers/server.py"           2>/dev/null || true
+    pkill -f "python Servers/chat_server.py"      2>/dev/null || true
     pkill -f "python Servers/node.py"             2>/dev/null || true
-    pkill -f "python Servers/client.py"           2>/dev/null || true
+    pkill -f "python Servers/chat_client.py"      2>/dev/null || true
     for pid in "${TERM_PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
@@ -75,7 +75,7 @@ launch() {
 launch "Dir-Server"  "python Servers/directory_server.py"
 sleep 1
 
-launch "Dest-Server" "python Servers/server.py --port 9000"
+launch "Chat-Server" "python Servers/chat_server.py --port 8001"
 sleep 1
 
 # Entry:  ports 9001..900N
@@ -94,7 +94,7 @@ for ((i=1; i<=NODE_COUNT; i++)); do
 done
 
 sleep 1
-launch "Tor-Client" "python Servers/client.py --dest-port 9000"
+launch "Chat-Client-Tor" "python Servers/chat_client.py --tor --port 8001"
 
 echo "All components running. Press Ctrl+C to stop everything."
 while true; do sleep 1; done

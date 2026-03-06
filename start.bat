@@ -29,7 +29,7 @@ if defined DEBUG_FLAG echo Debug mode enabled for nodes.
 start "Dir-Server"  cmd /k "cd /d "%~dp0" && venv\Scripts\activate && python Servers\directory_server.py"
 timeout /t 1 /nobreak >nul
 
-start "Dest-Server" cmd /k "cd /d "%~dp0" && venv\Scripts\activate && python Servers\server.py --port 9000"
+start "Chat-Server" cmd /k "cd /d "%~dp0" && venv\Scripts\activate && python Servers\chat_server.py --port 8001"
 timeout /t 1 /nobreak >nul
 
 for /L %%i in (1,1,%NODE_COUNT%) do (
@@ -45,7 +45,7 @@ for /L %%i in (1,1,%NODE_COUNT%) do (
 )
 
 timeout /t 1 /nobreak >nul
-start "Tor-Client"  cmd /k "cd /d "%~dp0" && venv\Scripts\activate && python Servers\client.py --dest-port 9000"
+start "Chat-Client-Tor" cmd /k "cd /d "%~dp0" && venv\Scripts\activate && python Servers\chat_client.py --tor --port 8001"
 
 echo.
 echo All components running. Press any key to stop everything...
@@ -53,9 +53,9 @@ pause >nul
 
 :cleanup
 echo Stopping all components...
-taskkill /FI "WINDOWTITLE eq Dir-Server"  /T /F >nul 2>&1
-taskkill /FI "WINDOWTITLE eq Dest-Server" /T /F >nul 2>&1
-taskkill /FI "WINDOWTITLE eq Tor-Client"  /T /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq Dir-Server"      /T /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq Chat-Server"     /T /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq Chat-Client-Tor" /T /F >nul 2>&1
 for /L %%i in (1,1,%NODE_COUNT%) do (
     taskkill /FI "WINDOWTITLE eq Entry-Node-%%i"  /T /F >nul 2>&1
     taskkill /FI "WINDOWTITLE eq Middle-Node-%%i" /T /F >nul 2>&1

@@ -1,0 +1,11 @@
+[project]
+name = "school-tor"
+version = "0.1.0"
+description = "this is a 100% super secure custom tor based chat"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "customtkinter>=5.2.2",
+    "pycryptodome>=3.23.0",
+    "textual>=8.2.3",
+]

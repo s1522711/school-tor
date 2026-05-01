@@ -99,6 +99,212 @@ Control messages are JSON objects with a `"type"` field. The chat protocol wraps
 
 ---
 
+## Tor protocol
+
+All Tor control messages use the same length-prefixed framing as the chat protocol:
+
+```
+┌─────────────────────┬──────────────────────────────┐
+│  4-byte big-endian  │  payload (JSON)               │
+│  length header      │                               │
+└─────────────────────┴──────────────────────────────┘
+```
+
+### Message types
+
+| `type` | Direction | Purpose |
+|--------|-----------|---------|
+| `CIRCUIT_SETUP` | client → entry → middle → exit | Establish one hop of the circuit |
+| `RELAY` | client → entry → middle → exit | Send one onion-encrypted payload forward |
+| `RELAY_RESPONSE` | exit → middle → entry → client | Return a response back through the circuit |
+
+---
+
+### `CIRCUIT_SETUP`
+
+Sent by the client to the entry node. Each node decrypts its own layer and forwards the nested payload to the next hop.
+
+**Wire message:**
+```json
+{
+    "type": "CIRCUIT_SETUP",
+    "circuit_id": "<uuid string>",
+    "payload": {
+        "encrypted_key":  "<base64 — RSA-OAEP(this_node_pub, setup_aes_key)>",
+        "encrypted_data": "<base64 — AES-CBC(setup_aes_key, json_inner)>"
+    }
+}
+```
+
+**`json_inner` for entry/middle nodes:**
+```json
+{
+    "key":             "<base64 — 16-byte AES relay key for this hop>",
+    "next_host":       "127.0.0.1",
+    "next_port":       9002,
+    "forward_payload": { "encrypted_key": "...", "encrypted_data": "..." }
+}
+```
+
+**`json_inner` for the exit node:**
+```json
+{
+    "key":       "<base64 — 16-byte AES relay key for this hop>",
+    "dest_host": "127.0.0.1",
+    "dest_port": 8001
+}
+```
+
+**Hybrid encryption rationale:** RSA-OAEP (2048-bit) can encrypt at most ~214 bytes. Routing data with nested payloads far exceeds that limit. Only the 16-byte ephemeral `setup_aes_key` is RSA-encrypted; all routing data is AES-CBC encrypted with that key.
+
+**Response (each node to previous hop):**
+```json
+{"status": "ok"}
+```
+or on failure:
+```json
+{"status": "error", "msg": "<reason>"}
+```
+
+**Setup cascade:** The client constructs the payloads from the inside out (exit → middle → entry). The entry node decrypts its layer, opens a TCP socket to the middle, forwards the nested payload as a new `CIRCUIT_SETUP`, and blocks until it receives `{"status": "ok"}` from the middle before replying to the client. The cascade is: client → entry → middle → exit → (ok) → middle → (ok) → entry → (ok) → client.
+
+---
+
+### `RELAY`
+
+Carries an onion-encrypted payload through the circuit. The client triple-encrypts the plaintext (K3 innermost, K1 outermost). Each hop peels one layer.
+
+**Wire message:**
+```json
+{
+    "type": "RELAY",
+    "circuit_id": "<uuid string>",
+    "data": "<base64 — AES-CBC ciphertext>"
+}
+```
+
+**Onion layer format (each layer):** `[IV 16B][ciphertext (multiple of 16B)]`
+This is the raw output of `aes_encrypt(key, inner_bytes)`.
+
+**Client sends:** `AES_K1( AES_K2( AES_K3(plaintext) ) )` — base64-encoded in `data`.
+
+**Each hop decrypts:** strips its own layer from `data`, then:
+- Entry/middle: forwards as a new `RELAY` with the stripped bytes in `data`.
+- Exit: decrypted bytes are either the plaintext payload (non-empty → deliver to dest) or empty bytes (→ poll for pushed server messages).
+
+**Exit node behaviour:**
+- **Real relay** (non-empty payload): sends plaintext to `dest_sock` via `send_msg`, waits up to 5 s with `select.select` for a response.
+- **Poll** (empty payload `b''`): skips the send, waits up to 0.5 s for any server-pushed data.
+- In both cases, `raw_response` is whatever arrived (or `b''` on timeout), then re-encrypted for the return trip.
+
+---
+
+### `RELAY_RESPONSE`
+
+Carries the server's response (or `b''` for no data) back through the circuit. Each hop re-encrypts with its own key on the way back.
+
+**Wire message:**
+```json
+{
+    "type": "RELAY_RESPONSE",
+    "circuit_id": "<uuid string>",
+    "data": "<base64 — AES-CBC ciphertext>"
+}
+```
+
+or on error:
+```json
+{
+    "type": "RELAY_RESPONSE",
+    "circuit_id": "<uuid string>",
+    "error": "<reason>"
+}
+```
+
+**Backward encryption stack:**
+```
+exit   sends: AES_K3(raw_response)
+middle sends: AES_K2( AES_K3(raw_response) )
+entry  sends: AES_K1( AES_K2( AES_K3(raw_response) ) )
+client decrypts: K1 → K2 → K3 → raw_response
+```
+
+**Client interpretation:** After peeling all three layers, if the result is `b''` the response is "no pending message". Otherwise it is a length-prefixed chat protocol frame.
+
+---
+
+### Circuit teardown
+
+There is no explicit teardown message. When the client closes the TCP connection to the entry node, `recv_msg` on the entry returns `None`. The entry's `finally` block closes `next_sock` to the middle, which causes the middle's `recv_msg` to return `None`, which closes its `next_sock` to the exit, which closes `dest_sock` to the chat server. The cascade is automatic.
+
+---
+
+### Poll mechanism — receiving push notifications in Tor mode
+
+**The problem:** A Tor circuit is strictly request/response. The client sends a `RELAY`, the exit node delivers it to the chat server and returns the response. The server has no way to push messages (e.g. `IncomingMessage` from another user) back through the circuit spontaneously — the circuit has no open "upstream" channel.
+
+**The solution — empty relay as a poll signal:**
+
+The client's receiver thread continuously sends `RELAY` messages carrying an encrypted empty payload. The exit node recognises the empty payload as a poll request and uses a short `select()` timeout to check whether the chat server has pushed anything. This turns a request/response circuit into a ~2/s notification channel.
+
+#### Step-by-step
+
+1. **Client receiver thread** (`tor_receiver` / `Connection._tor_receiver`) calls `TorSocket.poll()` in a tight loop with no sleep.
+
+2. **`poll()` encrypts empty bytes:** `b''` is triple-encrypted K3 → K2 → K1 and sent as a normal `RELAY` message. PKCS7 pads `b''` to 16 bytes before AES-CBC, so the ciphertext is a valid 32-byte blob (IV + one block). The intermediate nodes cannot distinguish a poll from a real relay — the ciphertext is indistinguishable.
+
+3. **Entry and middle nodes** peel their layer and forward as they would any other `RELAY`. They never see the plaintext.
+
+4. **Exit node** decrypts K3 and examines the result:
+   - **Non-empty → real relay:** calls `send_msg(dest_sock, payload)` to deliver to the chat server, then `select.select([dest_sock], [], [], 5.0)` to wait up to 5 seconds for the server's response (e.g. `Ack`).
+   - **Empty → poll:** skips `send_msg` entirely, calls `select.select([dest_sock], [], [], 0.5)` to wait up to **0.5 seconds** for any server-pushed data.
+   - In both cases: if `select` reports data ready, reads one message with `recv_msg(dest_sock)`; otherwise `raw_response = b''`.
+   - Re-encrypts `raw_response` with K3 and sends `RELAY_RESPONSE`.
+
+5. **Middle and entry** re-encrypt with K2 and K1 respectively and return `RELAY_RESPONSE`.
+
+6. **`poll()` decrypts K1 → K2 → K3:**
+   - Empty result → returns `None` (no message pending). The receiver loop immediately calls `poll()` again.
+   - Non-empty result → `json.loads(dec)` → returns the parsed message dict (e.g. `{"type": "IncomingMessage", "data": {...}}`).
+
+7. **Natural pacing:** Each `poll()` call blocks for up to 0.5 s inside the exit node's `select()`. No `sleep()` is needed in the receiver loop — the blocking inside the circuit provides it. This yields approximately 2 polls per second.
+
+#### Thread safety
+
+`TorSocket._lock` serialises access to the entry socket. The **main thread** calls `TorSocket.sendall()` (when the user sends a message) and the **receiver thread** calls `TorSocket.poll()` concurrently. Without the lock, both threads could send a `RELAY` and read a `RELAY_RESPONSE` at the same time, each receiving the other's response.
+
+The lock makes `sendall` and `poll` mutually exclusive: one complete RELAY/RELAY_RESPONSE exchange always finishes before the other can start.
+
+#### Interaction with `sendall`
+
+When the main thread calls `sendall()`:
+1. It acquires `_lock`, sends the real `RELAY`, reads the `RELAY_RESPONSE`, decrypts it, and buffers any non-empty response in `_buf`.
+2. The response (e.g. `Ack`) is buffered so `recv_msg(tor_sock)` can read it immediately after `sendall` returns.
+3. The receiver thread is blocked on `_lock` during this time and resumes polling only after `sendall` releases the lock.
+
+#### Why the exit node can tell poll from real relay
+
+After decrypting K3, empty bytes (`b''`) means poll; any non-empty bytes mean a real message. Valid chat protocol data is always non-empty (the minimum is a JSON object `{"type":"...","data":{}}` which is several dozen bytes). There is no ambiguity.
+
+#### Timing diagram
+
+```
+receiver thread                exit node                   chat server
+──────────────                 ─────────                   ───────────
+poll() → RELAY(empty)  ──────► decrypts K3 → b''
+                                 select(dest_sock, 0.5s)
+                          ◄──── nothing pending → RELAY_RESPONSE(empty)
+poll() returns None
+
+poll() → RELAY(empty)  ──────► decrypts K3 → b''
+                                 select(dest_sock, 0.5s)   ◄── IncomingMessage pushed
+                                 recv_msg(dest_sock)
+                          ◄──── AES_K3(message) → RELAY_RESPONSE
+poll() returns {"type":"IncomingMessage", ...}
+```
+
+---
+
 ## Component deep-dives
 
 ---

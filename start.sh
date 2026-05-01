@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 cd "$(dirname "$0")"
 
-# Activate venv
-if [ -f "venv/bin/activate" ]; then
-    source venv/bin/activate
-fi
-
 DEBUG_FLAG=""
 NODE_COUNT=1
 
@@ -26,17 +21,17 @@ launch() {
     local cmd="$2"
     osascript > /dev/null 2>&1 <<EOF
 tell application "Terminal"
-    do script "cd '$PWD' && source venv/bin/activate && $cmd"
+    do script "cd '$PWD' && $cmd"
 end tell
 EOF
 }
 
 # ── Start infrastructure ───────────────────────────────────────────────────────
 
-launch "Dir-Server"  "python Servers/directory_server.py"
+launch "Dir-Server"  "uv run Servers/directory_server.py"
 sleep 1
 
-launch "Chat-Server" "python Servers/chat_server.py --port 8001"
+launch "Chat-Server" "uv run Servers/chat_server.py --port 8001"
 sleep 1
 
 # ── Start relay nodes ──────────────────────────────────────────────────────────
@@ -49,15 +44,15 @@ for ((i=1; i<=NODE_COUNT; i++)); do
     MIDDLE_PORT=$((9100 + i))
     EXIT_PORT=$((9200 + i))
 
-    launch "Entry-Node-$i"  "python Servers/node.py --type entry  --port $ENTRY_PORT  $DEBUG_FLAG"
+    launch "Entry-Node-$i"  "uv run Servers/node.py --type entry  --port $ENTRY_PORT  $DEBUG_FLAG"
     sleep 1
-    launch "Middle-Node-$i" "python Servers/node.py --type middle --port $MIDDLE_PORT $DEBUG_FLAG"
+    launch "Middle-Node-$i" "uv run Servers/node.py --type middle --port $MIDDLE_PORT $DEBUG_FLAG"
     sleep 1
-    launch "Exit-Node-$i"   "python Servers/node.py --type exit   --port $EXIT_PORT   $DEBUG_FLAG"
+    launch "Exit-Node-$i"   "uv run Servers/node.py --type exit   --port $EXIT_PORT   $DEBUG_FLAG"
     sleep 1
 done
 
 sleep 1
-launch "Chat-Client-Tor" "python Servers/chat_client.py --tor --port 8001"
+# launch "Chat-Client-Tor" "uv run Servers/chat_client.py --tor --port 8001"
 
 echo "All components running in separate Terminal windows."

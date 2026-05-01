@@ -26,26 +26,26 @@ goto parse_args
 echo Starting onion network (%NODE_COUNT% node(s) per type)...
 if defined DEBUG_FLAG echo Debug mode enabled for nodes.
 
-start "Dir-Server"  cmd /k "cd /d "%~dp0" && venv\Scripts\activate && python Servers\directory_server.py"
+start "Dir-Server"  cmd /k "cd /d "%~dp0" && uv runServers\directory_server.py"
 timeout /t 1 /nobreak >nul
 
-start "Chat-Server" cmd /k "cd /d "%~dp0" && venv\Scripts\activate && python Servers\chat_server.py --port 8001"
+start "Chat-Server" cmd /k "cd /d "%~dp0" && uv runServers\chat_server.py --port 8001"
 timeout /t 1 /nobreak >nul
 
 for /L %%i in (1,1,%NODE_COUNT%) do (
     set /a ENTRY_PORT=9000+%%i
     set /a MIDDLE_PORT=9100+%%i
     set /a EXIT_PORT=9200+%%i
-    start "Entry-Node-%%i"  cmd /k "cd /d "%~dp0" && venv\Scripts\activate && python Servers\node.py --type entry  --port !ENTRY_PORT!  %DEBUG_FLAG%"
+    start "Entry-Node-%%i"  cmd /k "cd /d "%~dp0" && uv runServers\node.py --type entry  --port !ENTRY_PORT!  %DEBUG_FLAG%"
     timeout /t 1 /nobreak >nul
-    start "Middle-Node-%%i" cmd /k "cd /d "%~dp0" && venv\Scripts\activate && python Servers\node.py --type middle --port !MIDDLE_PORT! %DEBUG_FLAG%"
+    start "Middle-Node-%%i" cmd /k "cd /d "%~dp0" && uv runServers\node.py --type middle --port !MIDDLE_PORT! %DEBUG_FLAG%"
     timeout /t 1 /nobreak >nul
-    start "Exit-Node-%%i"   cmd /k "cd /d "%~dp0" && venv\Scripts\activate && python Servers\node.py --type exit   --port !EXIT_PORT!   %DEBUG_FLAG%"
+    start "Exit-Node-%%i"   cmd /k "cd /d "%~dp0" && uv runServers\node.py --type exit   --port !EXIT_PORT!   %DEBUG_FLAG%"
     timeout /t 1 /nobreak >nul
 )
 
 timeout /t 1 /nobreak >nul
-start "Chat-Client-Tor" cmd /k "cd /d "%~dp0" && venv\Scripts\activate && python Servers\chat_client.py --tor --port 8001"
+start "Chat-Client-Tor" cmd /k "cd /d "%~dp0" && uv runServers\chat_client.py --tor --port 8001"
 
 echo.
 echo All components running. Press any key to stop everything...

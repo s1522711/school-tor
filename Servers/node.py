@@ -560,7 +560,6 @@ def handle_connection(conn, addr):
         conn — accepted TCP socket from the previous hop or the client.
         addr — (host, port) of the connecting party, used for logging.
     """
-    print(f"[{node_type.upper()}] Connection from {addr}")
     local_circuits: set = set()
     try:
         while True:
@@ -571,9 +570,13 @@ def handle_connection(conn, addr):
             t = msg.get('type')
 
             if t == 'CIRCUIT_SETUP':
+                print(f"[{node_type.upper()}] Connection from {addr}")
                 handle_circuit_setup(conn, msg, local_circuits)
             elif t == 'RELAY':
                 handle_relay(conn, msg)
+            elif t == 'PING':
+                print(f"[{node_type.upper()}] Health check from {addr[0]}")
+                send_msg(conn, {'status': 'pong'})
             else:
                 print(f"[{node_type.upper()}] Unknown message type: {t!r}")
     except Exception as e:

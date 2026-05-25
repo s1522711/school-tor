@@ -6,9 +6,13 @@ Nodes register here on startup. Clients query here to discover the circuit nodes
 import socket
 import json
 import threading
+import time
 
 nodes = []
 nodes_lock = threading.Lock()
+
+_CHECK_INTERVAL = 10   # seconds between health check rounds
+_MAX_FAILURES   = 3    # consecutive failures before a node is removed
 
 
 def recv_msg(sock):
@@ -73,6 +77,65 @@ def send_msg(sock, data):
     sock.sendall(len(data).to_bytes(4, 'big') + data)
 
 
+def check_node(node: dict) -> bool:
+    """
+    Open a short-lived TCP connection to node, send PING, expect pong.
+    Returns True if the node responds correctly within 5 seconds.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5.0)
+        s.connect((node['host'], node['port']))
+        send_msg(s, {'type': 'PING'})
+        raw = recv_msg(s)
+        s.close()
+        if raw is None:
+            return False
+        return json.loads(raw).get('status') == 'pong'
+    except Exception:
+        return False
+
+
+def health_check_loop():
+    """
+    Background daemon thread: every _CHECK_INTERVAL seconds, ping every
+    registered node. Increment its fail_count on failure; reset to 0 on
+    success. Remove the node once fail_count reaches _MAX_FAILURES.
+    """
+    while True:
+        time.sleep(_CHECK_INTERVAL)
+
+        with nodes_lock:
+            snapshot = [(n['host'], n['port']) for n in nodes]
+
+        for host, port in snapshot:
+            # Find the live node entry (may have been removed or re-registered
+            # since we took the snapshot, so look it up fresh under the lock).
+            with nodes_lock:
+                node = next((n for n in nodes if n['host'] == host and n['port'] == port), None)
+            if node is None:
+                continue
+
+            alive = check_node(node)
+
+            with nodes_lock:
+                # Re-find by host:port in case the list changed during the check.
+                entry = next((n for n in nodes if n['host'] == host and n['port'] == port), None)
+                if entry is None:
+                    continue
+                if alive:
+                    entry['fail_count'] = 0
+                else:
+                    entry['fail_count'] += 1
+                    fails = entry['fail_count']
+                    label = f"{entry['node_type']} at {host}:{port}"
+                    if fails >= _MAX_FAILURES:
+                        nodes.remove(entry)
+                        print(f"[DIR] Removed unresponsive {label} after {_MAX_FAILURES} failed checks")
+                    else:
+                        print(f"[DIR] Health check failed ({fails}/{_MAX_FAILURES}): {label}")
+
+
 def handle_client(conn, addr):
     """
     Handle one incoming connection to the directory server.
@@ -114,17 +177,22 @@ def handle_client(conn, addr):
                 # Replace existing entry for same host:port if re-registering
                 nodes[:] = [n for n in nodes if not (n['host'] == msg['host'] and n['port'] == msg['port'])]
                 nodes.append({
-                    'node_type': msg['node_type'],
-                    'host': msg['host'],
-                    'port': msg['port'],
+                    'node_type':  msg['node_type'],
+                    'host':       msg['host'],
+                    'port':       msg['port'],
                     'public_key': msg['public_key'],
+                    'fail_count': 0,
                 })
             print(f"[DIR] Registered {msg['node_type']} node at {msg['host']}:{msg['port']}")
             send_msg(conn, {'status': 'ok'})
 
         elif msg['type'] == 'GET_NODES':
             with nodes_lock:
-                send_msg(conn, {'nodes': list(nodes)})
+                public = [
+                    {k: v for k, v in n.items() if k != 'fail_count'}
+                    for n in nodes
+                ]
+            send_msg(conn, {'nodes': public})
 
     except Exception as e:
         print(f"[DIR] Error handling {addr}: {e}")
@@ -161,6 +229,9 @@ def main():
     server.listen(20)
     server.settimeout(1.0)
     print(f"[DIR] Directory server listening on {HOST}:{PORT}")
+
+    checker = threading.Thread(target=health_check_loop, daemon=True)
+    checker.start()
 
     try:
         while True:

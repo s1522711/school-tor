@@ -315,19 +315,30 @@ poll() returns {"type":"IncomingMessage", ...}
 
 **State:** Module-level list `nodes` (protected by `nodes_lock`). Each entry:
 ```python
-{'node_type': 'entry'|'middle'|'exit', 'host': str, 'port': int, 'public_key': str}
+{'node_type': 'entry'|'middle'|'exit', 'host': str, 'port': int, 'public_key': str, 'fail_count': int}
 ```
+`fail_count` is internal — it is stripped before the list is sent to clients via `GET_NODES`.
 
 **Protocol — one request/response per connection:**
 
 | Incoming `type` | Fields | Response |
 |---|---|---|
 | `REGISTER` | `node_type`, `host`, `port`, `public_key` (PEM) | `{"status": "ok"}` |
-| `GET_NODES` | — | `{"nodes": [...]}` |
+| `GET_NODES` | — | `{"nodes": [...]}` (fail_count excluded) |
+| `PING` | — | `{"status": "pong"}` (sent by health checker, handled by node) |
 
-`REGISTER` upserts by `host:port` (allows node restarts without stale entries).
+`REGISTER` upserts by `host:port` (allows node restarts without stale entries) and resets `fail_count` to 0.
 
-**Threading:** One daemon thread per connection; each thread handles exactly one request then closes.
+**Health checking:** A background daemon thread (`health_check_loop`) runs every `_CHECK_INTERVAL` (30 s). Each round it snapshots the current node list, then for each node calls `check_node()` — a short-lived TCP connection that sends `{"type": "PING"}` and expects `{"status": "pong"}` within 5 seconds. Results update the live list under `nodes_lock`:
+- Success → `fail_count` reset to 0.
+- Failure → `fail_count` incremented; logged as `"Health check failed (N/3)"`.
+- `fail_count >= _MAX_FAILURES` (3) → node removed and logged as removed.
+
+The check is done **outside** the lock (no I/O while holding `nodes_lock`); the lock is only held briefly to read/write `fail_count` and to call `nodes.remove()`.
+
+**Constants:** `_CHECK_INTERVAL = 30`, `_MAX_FAILURES = 3` — both at the top of the file.
+
+**Threading:** One daemon thread per inbound connection (each handles one request then closes) plus one persistent `health_check_loop` daemon thread started in `main()`.
 
 **Soft shutdown:** `server.settimeout(1.0)` on the accept socket. `KeyboardInterrupt` is caught; `finally` closes the socket.
 
@@ -356,6 +367,11 @@ poll() returns {"type":"IncomingMessage", ...}
 **Threading:** One daemon thread per incoming connection via `handle_connection`. The thread owns the connection for its full lifetime and processes all circuits established over it.
 
 **Soft shutdown:** `server_sock.settimeout(1.0)`. `KeyboardInterrupt` caught; `finally` closes all `next_sock` and `dest_sock` from active circuits, then closes `server_sock`.
+
+**Message dispatch** (`handle_connection`): routes by `msg['type']`:
+- `CIRCUIT_SETUP` → `handle_circuit_setup`
+- `RELAY` → `handle_relay`
+- `PING` → immediately replies `{"status": "pong"}` (used by the directory server's health checker); the connection then closes naturally when the directory server disconnects.
 
 #### Circuit setup (`CIRCUIT_SETUP`)
 
@@ -946,6 +962,241 @@ The `filedata` string is captured in the button's `command` lambda at creation t
 - Only used to encrypt the 16-byte ephemeral setup key per hop. Never used for relay data.
 - Public key distributed as PEM string via the directory server at registration time.
 - Max plaintext for RSA-OAEP (2048-bit): ~214 bytes — well above 16 bytes, well below routing payloads.
+- **RSA is used only during `CIRCUIT_SETUP`.** After the setup cascade completes, the node's RSA private key is never touched again — all subsequent `RELAY` traffic uses only AES-CBC with K1/K2/K3.
+
+---
+
+## RSA key delivery vs Diffie-Hellman
+
+This project uses RSA-OAEP to deliver pre-generated AES keys. Real Tor uses Diffie-Hellman (the ntor handshake, based on X25519 ECDH). The differences matter for security.
+
+### Who determines the session key
+
+**This project:** The client picks K1, K2, K3 with `get_random_bytes(16)` and delivers them to each node via RSA. The node has no say in what the key is — it just decrypts and stores whatever the client sent.
+
+**Diffie-Hellman:** Both sides contribute randomness. The client sends `g^a mod p`; the node sends back `g^b mod p`; both compute `g^(a*b) mod p` as the shared secret. Neither side alone can predict or control the final key.
+
+### Forward secrecy
+
+**This project — no forward secrecy.** If a node's RSA private key is compromised later, an attacker who recorded past `CIRCUIT_SETUP` traffic can:
+1. RSA-decrypt `encrypted_key` → recover `setup_key`
+2. AES-decrypt `encrypted_data` with `setup_key` → recover K1/K2/K3
+3. Decrypt every `RELAY` message from that session
+
+All past sessions protected by that RSA key are retroactively exposed.
+
+**DH with ephemeral keys — perfect forward secrecy.** The DH private values (`a`, `b`) are generated fresh per circuit and discarded immediately after the handshake. Even if the node's long-term identity key is stolen later, the ephemeral DH private values are gone — past sessions cannot be decrypted.
+
+### Interactivity
+
+**This project:** Non-interactive from the node's side. The client sends one blob; the node decrypts and replies `{"status": "ok"}`. No per-hop round-trip for key material.
+
+**DH:** Requires a round-trip per hop — the node must send its public DH value (`g^b`) back to the client before the shared secret can be computed. This is why real Tor's circuit setup is a multi-step per-hop handshake, not a single nested cascade.
+
+### Summary table
+
+| Property | This project (RSA delivery) | Real Tor (DH/ntor) |
+|---|---|---|
+| Who picks the key | Client alone | Both parties jointly |
+| Forward secrecy | No | Yes (ephemeral keys discarded) |
+| Node round-trip during setup | No | Yes (node sends DH public value) |
+| Setup cost | RSA-OAEP decrypt once per hop | ECDH multiply once per hop (faster) |
+| Key compromise impact | All past sessions exposed | Only future sessions exposed |
+
+---
+
+## Full step-by-step circuit establishment
+
+This traces a complete connection from cold start to first message sent.
+
+### Phase 0 — Nodes register with the directory
+
+Each node runs this on startup (`node.py main()`):
+
+```
+1. Generate RSA-2048 keypair  (rsa_key = RSA.generate(2048))
+2. TCP connect to directory server :8000
+3. Send: {"type": "REGISTER", "node_type": "entry", "host": "127.0.0.1",
+           "port": 9001, "public_key": "<PEM>"}
+4. Directory upserts {node_type, host, port, public_key} into its nodes list
+5. Directory replies: {"status": "ok"}
+6. Node begins accepting connections
+```
+
+Three nodes do this — entry (:9001), middle (:9002), exit (:9003). The directory now holds each node's address and RSA public key.
+
+### Phase 1 — Client queries the directory
+
+`connect_tor()` → `get_nodes()` → `pick_nodes()` (`network.py:176–213`):
+
+```
+1. TCP connect to directory server :8000
+2. Send: {"type": "GET_NODES"}
+3. Receive: {"nodes": [
+     {node_type:"entry",  host:"127.0.0.1", port:9001, public_key:"-----BEGIN RSA..."},
+     {node_type:"middle", host:"127.0.0.1", port:9002, public_key:"-----BEGIN RSA..."},
+     {node_type:"exit",   host:"127.0.0.1", port:9003, public_key:"-----BEGIN RSA..."}
+   ]}
+4. Close connection
+5. Pick one node of each type at random
+```
+
+### Phase 2 — Client generates keys and builds the onion payload
+
+`build_circuit()` (`network.py:282–316`):
+
+```
+1. circuit_id = random UUID
+2. K1 = get_random_bytes(16)   ← entry's relay key
+   K2 = get_random_bytes(16)   ← middle's relay key
+   K3 = get_random_bytes(16)   ← exit's relay key
+```
+
+Payloads are constructed inside-out via `make_setup_payload()` (`network.py:244–251`):
+
+**Exit payload** (innermost — only the exit node can open this):
+```
+setup_key_exit = get_random_bytes(16)          ← throwaway delivery key
+encrypted_key  = RSA-OAEP(exit_pub, setup_key_exit)
+encrypted_data = AES-CBC(setup_key_exit, JSON{
+    "key":       base64(K3),
+    "dest_host": "127.0.0.1",
+    "dest_port": 9999
+})
+```
+
+**Middle payload** (wraps exit payload — only middle can open this):
+```
+setup_key_mid  = get_random_bytes(16)
+encrypted_key  = RSA-OAEP(middle_pub, setup_key_mid)
+encrypted_data = AES-CBC(setup_key_mid, JSON{
+    "key":             base64(K2),
+    "next_host":       "127.0.0.1",
+    "next_port":       9003,
+    "forward_payload": <exit_payload>
+})
+```
+
+**Entry payload** (outermost — only entry can open this):
+```
+setup_key_ent  = get_random_bytes(16)
+encrypted_key  = RSA-OAEP(entry_pub, setup_key_ent)
+encrypted_data = AES-CBC(setup_key_ent, JSON{
+    "key":             base64(K1),
+    "next_host":       "127.0.0.1",
+    "next_port":       9002,
+    "forward_payload": <middle_payload>
+})
+```
+
+### Phase 3 — CIRCUIT_SETUP cascades through the nodes
+
+Client sends to entry (`network.py:305–315`):
+```
+client → entry :9001
+{"type": "CIRCUIT_SETUP", "circuit_id": "<uuid>", "payload": <entry_payload>}
+```
+
+**Entry node** (`handle_circuit_setup`, `node.py:307–379`):
+```
+1. RSA-OAEP decrypt payload['encrypted_key']  → setup_key_ent
+2. AES-CBC decrypt payload['encrypted_data']   → {key:K1, next_host, next_port, forward_payload}
+3. Store K1 as this circuit's relay key
+4. TCP connect to middle :9002
+5. Send CIRCUIT_SETUP to middle with forward_payload (opaque to entry)
+6. BLOCK — waiting for middle's response
+```
+
+**Middle node** (same logic):
+```
+1. RSA-OAEP decrypt → setup_key_mid
+2. AES-CBC decrypt  → {key:K2, next_host, next_port, forward_payload}
+3. Store K2
+4. TCP connect to exit :9003
+5. Send CIRCUIT_SETUP to exit with forward_payload
+6. BLOCK
+```
+
+**Exit node** (`dest_host` branch, `node.py:317–336`):
+```
+1. RSA-OAEP decrypt → setup_key_exit
+2. AES-CBC decrypt  → {key:K3, dest_host:"127.0.0.1", dest_port:9999}
+3. Store K3
+4. TCP connect to chat server :9999  ← persistent for this circuit's lifetime
+5. Send {"status": "ok"} to middle
+```
+
+**"ok" bubbles back** (each blocking node was waiting):
+```
+middle receives "ok" from exit  → stores circuit → sends "ok" to entry
+entry  receives "ok" from middle → stores circuit → sends "ok" to client
+client receives "ok"            → circuit is live
+```
+
+After this phase:
+```
+client ──K1──► entry ──K2──► middle ──K3──► exit ──plain──► chat server
+       ◄──K1──       ◄──K2──        ◄──K3──      ◄──plain──
+```
+
+RSA is never used again. The three `setup_key_*` values are discarded.
+
+### Phase 4 — Sending the first message
+
+`TorSocket.sendall()` (`network.py:388–409`):
+```
+payload = raw JSON bytes (4-byte frame stripped)
+enc = AES-CBC(K3, payload)   ← exit's layer (innermost)
+enc = AES-CBC(K2, enc)       ← middle's layer
+enc = AES-CBC(K1, enc)       ← entry's layer (outermost)
+send RELAY {"type":"RELAY", "circuit_id":"<uuid>", "data": base64(enc)}
+```
+
+**Entry** (`handle_relay`, `node.py:447–500`):
+```
+peeled = AES-CBC-decrypt(K1, blob)   ← removes entry's layer; still K2(K3(payload))
+forward RELAY to middle with data=base64(peeled)
+BLOCK
+```
+
+**Middle**:
+```
+peeled = AES-CBC-decrypt(K2, blob)   ← removes middle's layer; still K3(payload)
+forward RELAY to exit
+BLOCK
+```
+
+**Exit**:
+```
+plaintext = AES-CBC-decrypt(K3, blob)   ← plaintext is now bare JSON
+send_msg(dest_sock, plaintext)          ← deliver to chat server
+select(dest_sock, timeout=5.0s)
+recv Ack from chat server
+re_enc = AES-CBC(K3, Ack)
+send RELAY_RESPONSE to middle
+```
+
+**Response re-wraps on the way back**:
+```
+middle: wrapped = AES-CBC(K2, re_enc)        → K2(K3(Ack))  → send to entry
+entry:  wrapped = AES-CBC(K1, wrapped)       → K1(K2(K3(Ack))) → send to client
+```
+
+**Client decrypts** (`network.py:405–407`):
+```
+dec = AES-CBC-decrypt(K1, data)
+dec = AES-CBC-decrypt(K2, dec)
+dec = AES-CBC-decrypt(K3, dec)   ← original Ack bytes
+buffered in TorSocket._buf
+```
+
+### Key facts about this design
+
+- **The client is the only party that ever holds K1+K2+K3 simultaneously.** Each node knows only its own one key.
+- **The three `setup_key_*` values are throwaway.** Generated once, used to deliver the relay key, then gone.
+- **No RSA after setup.** The node's RSA private key sits unused for the rest of the circuit's lifetime.
+- **Circuit sockets are persistent.** The entry socket (client→entry), next_sock (entry→middle, middle→exit), and dest_sock (exit→chat server) all stay open and are reused for every RELAY message — no reconnection per message.
+- **No forward secrecy.** A leaked RSA private key retroactively exposes all K1/K2/K3 values from past circuits established with that key.
 
 ---
 

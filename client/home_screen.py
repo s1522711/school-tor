@@ -3,7 +3,8 @@
 import threading
 import customtkinter as ctk
 
-from network import Connection, connect_direct, connect_tor
+from network import (Connection, connect_direct,
+                     get_nodes, pick_nodes, build_circuit, TorSocket)
 
 _ONION_PURPLE = "#7c3aed"
 _GREEN        = "#27ae60"
@@ -428,13 +429,19 @@ class HomeScreen(ctk.CTkFrame):
             try:
                 host, port, use_tor, dir_host, dir_port = self._get_params()
                 if use_tor:
+                    self.after(0, lambda: self._set_status("[Tor] Querying directory…"))
+                    nodes = get_nodes(dir_host, dir_port)
+                    entry, middle, exit_node = pick_nodes(nodes)
                     self.after(0, lambda: self._set_status("[Tor] Building circuit…"))
-                    conn = connect_tor(dir_host, dir_port, host, port)
+                    circuit_id, K1, K2, K3, sock = build_circuit(
+                        entry, middle, exit_node, host, port)
+                    conn = Connection(TorSocket(circuit_id, K1, K2, K3, sock), is_tor=True)
                 else:
                     conn = connect_direct(host, port)
                 self.after(0, lambda: self._on_connect_success(conn))
             except Exception as e:
-                self.after(0, lambda: self._on_connect_fail(str(e)))
+                msg = str(e)
+                self.after(0, lambda m=msg: self._on_connect_fail(m))
 
         threading.Thread(target=worker, daemon=True).start()
 

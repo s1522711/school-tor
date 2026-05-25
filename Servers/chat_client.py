@@ -226,7 +226,9 @@ def pick_nodes(nodes: list) -> tuple:
         by_type.setdefault(n['node_type'], []).append(n)
     missing = [t for t in ('entry', 'middle', 'exit') if not by_type.get(t)]
     if missing:
-        raise RuntimeError(f"Directory missing node type(s): {missing}")
+        types = ', '.join(missing)
+        noun  = 'nodes' if len(missing) > 1 else 'node'
+        raise RuntimeError(f"No {types} {noun} available — a node may be down, try again shortly")
     return (random.choice(by_type['entry']),
             random.choice(by_type['middle']),
             random.choice(by_type['exit']))

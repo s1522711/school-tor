@@ -30,6 +30,7 @@ import threading
 import base64
 import argparse
 import select
+import uuid
 
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES, PKCS1_OAEP
@@ -348,10 +349,15 @@ def handle_circuit_setup(conn, msg, local_circuits: set):
             send_msg(conn, {'status': 'error', 'msg': f'Cannot reach next hop: {e}'})
             return
 
+        # Generate a fresh circuit ID for the outgoing link so each hop uses a
+        # different identifier — an observer watching two links cannot correlate
+        # packets by circuit_id.
+        next_circuit_id = str(uuid.uuid4())
+
         # Forward setup (the nested payload is already encrypted for the next node)
         send_msg(next_sock, {
             'type': 'CIRCUIT_SETUP',
-            'circuit_id': circuit_id,
+            'circuit_id': next_circuit_id,
             'payload': forward_payload,
         })
 
@@ -371,6 +377,7 @@ def handle_circuit_setup(conn, msg, local_circuits: set):
             circuits[circuit_id] = {
                 'key': relay_key,
                 'next_sock': next_sock,
+                'next_circuit_id': next_circuit_id,
                 'dest': None,
                 'is_exit': False,
             }
@@ -495,7 +502,7 @@ def handle_relay(conn, msg):
         next_sock = circuit['next_sock']
         send_msg(next_sock, {
             'type': 'RELAY',
-            'circuit_id': circuit_id,
+            'circuit_id': circuit['next_circuit_id'],
             'data': base64.b64encode(decrypted).decode(),
         })
 

@@ -355,11 +355,12 @@ The check is done **outside** the lock (no I/O while holding `nodes_lock`); the 
 - `circuits` — dict keyed by circuit_id (UUID str):
   ```python
   {
-      'key':       bytes,          # AES-128 relay key for this hop
-      'next_sock': socket | None,  # persistent TCP socket to next hop (entry/middle only)
-      'dest_sock': socket | None,  # persistent TCP socket to dest server (exit only)
-      'dest':      (host, port),   # destination address (exit only, for reference)
-      'is_exit':   bool,
+      'key':             bytes,          # AES-128 relay key for this hop
+      'next_sock':       socket | None,  # persistent TCP socket to next hop (entry/middle only)
+      'next_circuit_id': str | None,     # fresh UUID for the outgoing link (entry/middle only)
+      'dest_sock':       socket | None,  # persistent TCP socket to dest server (exit only)
+      'dest':            (host, port),   # destination address (exit only, for reference)
+      'is_exit':         bool,
   }
   ```
 - `circuits_lock` — `threading.Lock` protecting `circuits`
@@ -393,10 +394,11 @@ Each node's payload uses **hybrid encryption**:
 **Entry/middle setup flow (`handle_circuit_setup`):**
 1. Decrypt payload → relay key + next hop address + forward payload.
 2. Open persistent TCP socket to next hop (`next_sock`).
-3. Forward `CIRCUIT_SETUP` with the inner payload to next hop.
-4. Block for `{"status": "ok"}` from next hop.
-5. Store circuit in `circuits`; add to `local_circuits`.
-6. Return `{"status": "ok"}` to previous hop.
+3. Generate a fresh `next_circuit_id` (UUID) for the outgoing link.
+4. Forward `CIRCUIT_SETUP` using `next_circuit_id` (not the incoming `circuit_id`) to next hop.
+5. Block for `{"status": "ok"}` from next hop.
+6. Store circuit in `circuits` (including `next_circuit_id`); add to `local_circuits`.
+7. Return `{"status": "ok"}` to previous hop.
 
 **Exit setup flow:**
 1. Decrypt payload → relay key + dest address.
@@ -425,7 +427,7 @@ client decrypts: K1 → K2 → K3 → R
 
 **Entry/middle relay handler (`handle_relay`):**
 1. Base64-decode `data`, AES-decrypt with own key.
-2. Forward stripped ciphertext to `next_sock` as a RELAY.
+2. Forward stripped ciphertext to `next_sock` as a RELAY, using `circuit['next_circuit_id']` as the circuit ID on the outgoing link.
 3. Block for RELAY_RESPONSE from next hop.
 4. AES-encrypt the response data with own key.
 5. Return RELAY_RESPONSE to previous hop.
@@ -1103,8 +1105,9 @@ client → entry :9001
 2. AES-CBC decrypt payload['encrypted_data']   → {key:K1, next_host, next_port, forward_payload}
 3. Store K1 as this circuit's relay key
 4. TCP connect to middle :9002
-5. Send CIRCUIT_SETUP to middle with forward_payload (opaque to entry)
-6. BLOCK — waiting for middle's response
+5. Generate a fresh next_circuit_id for the entry→middle link
+6. Send CIRCUIT_SETUP to middle with next_circuit_id and forward_payload (opaque to entry)
+7. BLOCK — waiting for middle's response
 ```
 
 **Middle node** (same logic):
@@ -1113,8 +1116,9 @@ client → entry :9001
 2. AES-CBC decrypt  → {key:K2, next_host, next_port, forward_payload}
 3. Store K2
 4. TCP connect to exit :9003
-5. Send CIRCUIT_SETUP to exit with forward_payload
-6. BLOCK
+5. Generate a fresh next_circuit_id for the middle→exit link
+6. Send CIRCUIT_SETUP to exit with next_circuit_id and forward_payload
+7. BLOCK
 ```
 
 **Exit node** (`dest_host` branch, `node.py:317–336`):
@@ -1149,20 +1153,20 @@ payload = raw JSON bytes (4-byte frame stripped)
 enc = AES-CBC(K3, payload)   ← exit's layer (innermost)
 enc = AES-CBC(K2, enc)       ← middle's layer
 enc = AES-CBC(K1, enc)       ← entry's layer (outermost)
-send RELAY {"type":"RELAY", "circuit_id":"<uuid>", "data": base64(enc)}
+send RELAY {"type":"RELAY", "circuit_id":"<entry_link_id>", "data": base64(enc)}
 ```
 
 **Entry** (`handle_relay`, `node.py:447–500`):
 ```
 peeled = AES-CBC-decrypt(K1, blob)   ← removes entry's layer; still K2(K3(payload))
-forward RELAY to middle with data=base64(peeled)
+forward RELAY to middle with circuit_id=next_circuit_id, data=base64(peeled)
 BLOCK
 ```
 
 **Middle**:
 ```
 peeled = AES-CBC-decrypt(K2, blob)   ← removes middle's layer; still K3(payload)
-forward RELAY to exit
+forward RELAY to exit with circuit_id=next_circuit_id
 BLOCK
 ```
 
@@ -1196,6 +1200,7 @@ buffered in TorSocket._buf
 - **The three `setup_key_*` values are throwaway.** Generated once, used to deliver the relay key, then gone.
 - **No RSA after setup.** The node's RSA private key sits unused for the rest of the circuit's lifetime.
 - **Circuit sockets are persistent.** The entry socket (client→entry), next_sock (entry→middle, middle→exit), and dest_sock (exit→chat server) all stay open and are reused for every RELAY message — no reconnection per message.
+- **Per-hop circuit IDs.** Each relay node generates a fresh UUID (`next_circuit_id`) for its outgoing link during `CIRCUIT_SETUP`. The `circuit_id` on client→entry is different from entry→middle and again different on middle→exit. An observer watching two links cannot correlate them by `circuit_id`.
 - **No forward secrecy.** A leaked RSA private key retroactively exposes all K1/K2/K3 values from past circuits established with that key.
 
 ---
@@ -1298,13 +1303,13 @@ self.after(0, lambda: _apply_stats(stats))
 
 | Node | Knows |
 |---|---|
-| Entry | Client's IP, middle's address, K1, forward payload (opaque blob) |
-| Middle | Entry's address, exit's address, K2, forward payload (opaque blob) |
+| Entry | Client's IP, middle's address, K1, its own incoming circuit ID — cannot link it to the ID used on the entry→middle link |
+| Middle | Entry's address, exit's address, K2, its own incoming circuit ID — cannot link it to adjacent links' IDs |
 | Exit | Middle's address, server's address, K3, plaintext message |
 | Server / Chat server | Exit's IP, plaintext message |
 | Directory | All node addresses and public keys; nothing about circuits or traffic |
 
-The chat server sees only the exit node's IP, never the real client's IP.
+The chat server sees only the exit node's IP, never the real client's IP. Each link uses a different `circuit_id`, so capturing packets on two links yields no correlation.
 
 ---
 

@@ -188,11 +188,11 @@ def handle_client(conn, addr):
 
         elif msg['type'] == 'GET_NODES':
             with nodes_lock:
-                public = [
-                    {k: v for k, v in n.items() if k != 'fail_count'}
-                    for n in nodes
-                ]
-            send_msg(conn, {'nodes': public})
+                by_type: dict[str, list] = {}
+                for n in nodes:
+                    entry = {k: v for k, v in n.items() if k != 'fail_count'}
+                    by_type.setdefault(n['node_type'], []).append(entry)
+            send_msg(conn, {'nodes': by_type})
 
     except Exception as e:
         print(f"[DIR] Error handling {addr}: {e}")

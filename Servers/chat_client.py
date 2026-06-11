@@ -173,14 +173,14 @@ def aes_decrypt(key: bytes, ciphertext: bytes) -> bytes:
     return unpad(cipher.decrypt(ct), AES.block_size)
 
 
-def get_nodes(dir_host: str, dir_port: int) -> list:
+def get_nodes(dir_host: str, dir_port: int) -> dict:
     """
-    Query the directory server for the list of registered relay nodes.
+    Query the directory server for the registered relay nodes, grouped by type.
 
     How it works:
         Opens a short-lived TCP connection to the directory server, sends a
         GET_NODES request, reads and parses the JSON response, closes the
-        connection, and returns the node list. Each node dict contains:
+        connection, and returns the grouped dict. Each node dict contains:
         {node_type, host, port, public_key (PEM)}.
 
     Why it exists:
@@ -190,7 +190,7 @@ def get_nodes(dir_host: str, dir_port: int) -> list:
         CIRCUIT_SETUP payloads.
 
     Returns:
-        list[dict] — all registered nodes.
+        dict[str, list[dict]] — nodes grouped by type: {'entry': [...], 'middle': [...], 'exit': [...]}.
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.connect((dir_host, dir_port))
@@ -200,14 +200,14 @@ def get_nodes(dir_host: str, dir_port: int) -> list:
     return resp['nodes']
 
 
-def pick_nodes(nodes: list) -> tuple:
+def pick_nodes(nodes: dict) -> tuple:
     """
     Randomly select one entry, one middle, and one exit node.
 
     How it works:
-        Groups all nodes by 'node_type', then calls random.choice() on each
-        group independently. If any type is missing, raises RuntimeError so
-        the caller gets a clear message rather than a silent KeyError.
+        Calls random.choice() on each type's list from the grouped dict.
+        If any type is missing, raises RuntimeError so the caller gets a
+        clear message rather than a silent KeyError.
 
     Why it exists:
         Randomising node selection makes traffic correlation harder — an
@@ -221,17 +221,14 @@ def pick_nodes(nodes: list) -> tuple:
     Raises:
         RuntimeError — if any node type is missing from the directory.
     """
-    by_type = {}
-    for n in nodes:
-        by_type.setdefault(n['node_type'], []).append(n)
-    missing = [t for t in ('entry', 'middle', 'exit') if not by_type.get(t)]
+    missing = [t for t in ('entry', 'middle', 'exit') if not nodes.get(t)]
     if missing:
         types = ', '.join(missing)
         noun  = 'nodes' if len(missing) > 1 else 'node'
         raise RuntimeError(f"No {types} {noun} available — a node may be down, try again shortly")
-    return (random.choice(by_type['entry']),
-            random.choice(by_type['middle']),
-            random.choice(by_type['exit']))
+    return (random.choice(nodes['entry']),
+            random.choice(nodes['middle']),
+            random.choice(nodes['exit']))
 
 
 def make_setup_payload(pub_pem: str, inner: dict) -> dict:

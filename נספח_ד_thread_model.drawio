@@ -1,0 +1,106 @@
+<mxfile host="Electron">
+  <diagram name="נספח ד — Thread Model" id="appendix-d-threads">
+    <mxGraphModel dx="1015" dy="665" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1020" pageHeight="560" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="101" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontStyle=1;" value="Appendix D — Thread Model Diagram" vertex="1">
+          <mxGeometry height="24" width="1000" as="geometry" />
+        </mxCell>
+        <mxCell id="2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontStyle=1;fontSize=14;verticalAlign=top;" value="תהליך הלקוח (Python GUI)" vertex="1">
+          <mxGeometry height="380" width="470" x="20" y="38" as="geometry" />
+        </mxCell>
+        <mxCell id="3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b3d4f5;strokeColor=#5599cc;fontStyle=1;fontSize=12;verticalAlign=top;" value="Main Thread — Tkinter event loop" vertex="1">
+          <mxGeometry height="95" width="430" x="40" y="88" as="geometry" />
+        </mxCell>
+        <mxCell id="3a" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• GUI updates (widget state, labels, text box)" vertex="1">
+          <mxGeometry height="18" width="390" x="55" y="115" as="geometry" />
+        </mxCell>
+        <mxCell id="3b" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• on_message callbacks  (scheduled via .after(0, ...))" vertex="1">
+          <mxGeometry height="18" width="400" x="55" y="137" as="geometry" />
+        </mxCell>
+        <mxCell id="3c" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• on_disconnect callbacks" vertex="1">
+          <mxGeometry height="18" width="300" x="55" y="159" as="geometry" />
+        </mxCell>
+        <mxCell id="4" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b3d4f5;strokeColor=#5599cc;fontStyle=1;fontSize=12;verticalAlign=top;" value="Worker Threads — daemon, per operation (short-lived)" vertex="1">
+          <mxGeometry height="98" width="430" x="40" y="196" as="geometry" />
+        </mxCell>
+        <mxCell id="4a" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• connect worker  (build circuit or direct TCP)" vertex="1">
+          <mxGeometry height="18" width="370" x="55" y="224" as="geometry" />
+        </mxCell>
+        <mxCell id="4b" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• create/join room worker  (send_to + recv_one)" vertex="1">
+          <mxGeometry height="18" width="390" x="55" y="246" as="geometry" />
+        </mxCell>
+        <mxCell id="4c" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• stats fetch worker  (GetStats + recv_one)" vertex="1">
+          <mxGeometry height="18" width="370" x="55" y="268" as="geometry" />
+        </mxCell>
+        <mxCell id="5" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b3d4f5;strokeColor=#5599cc;fontStyle=1;fontSize=12;verticalAlign=top;" value="Receiver Thread — daemon, persistent (per session)" vertex="1">
+          <mxGeometry height="96" width="430" x="40" y="308" as="geometry" />
+        </mxCell>
+        <mxCell id="5a" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• Direct mode: _direct_receiver — select(sock, 0.5s) loop" vertex="1">
+          <mxGeometry height="18" width="400" x="55" y="334" as="geometry" />
+        </mxCell>
+        <mxCell id="5b" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• Tor mode: _tor_receiver — TorSocket.poll() loop" vertex="1">
+          <mxGeometry height="18" width="390" x="55" y="356" as="geometry" />
+        </mxCell>
+        <mxCell id="5c" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• TorSocket._lock serialises poll ↔ sendall (no race)" vertex="1">
+          <mxGeometry height="18" width="400" x="55" y="378" as="geometry" />
+        </mxCell>
+        <mxCell id="6" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;fontSize=14;verticalAlign=top;" value="תהליך כל צומת / שרת" vertex="1">
+          <mxGeometry height="310" width="470" x="530" y="38" as="geometry" />
+        </mxCell>
+        <mxCell id="7" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a8d5a2;strokeColor=#5a9e5a;fontStyle=1;fontSize=12;verticalAlign=top;" value="Main Thread — accept loop" vertex="1">
+          <mxGeometry height="62" width="430" x="550" y="88" as="geometry" />
+        </mxCell>
+        <mxCell id="7a" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• server_sock.settimeout(1.0) — safe KeyboardInterrupt handling" vertex="1">
+          <mxGeometry height="18" width="400" x="565" y="114" as="geometry" />
+        </mxCell>
+        <mxCell id="8" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a8d5a2;strokeColor=#5a9e5a;fontStyle=1;fontSize=12;verticalAlign=top;" value="Connection Threads — daemon, per connection" vertex="1">
+          <mxGeometry height="82" width="430" x="550" y="164" as="geometry" />
+        </mxCell>
+        <mxCell id="8a" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• handle_connection  (node.py — CIRCUIT_SETUP + RELAY)" vertex="1">
+          <mxGeometry height="18" width="400" x="565" y="192" as="geometry" />
+        </mxCell>
+        <mxCell id="8b" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• _handle_connection  (chat_server.py — all message types)" vertex="1">
+          <mxGeometry height="18" width="410" x="565" y="214" as="geometry" />
+        </mxCell>
+        <mxCell id="9" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a8d5a2;strokeColor=#5a9e5a;fontStyle=1;fontSize=12;verticalAlign=top;" value="Health Check Thread — directory server only" vertex="1">
+          <mxGeometry height="74" width="430" x="550" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="9a" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• health_check_loop — runs every 30 seconds" vertex="1">
+          <mxGeometry height="18" width="370" x="565" y="286" as="geometry" />
+        </mxCell>
+        <mxCell id="9b" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="• fail_count ≥ 3  →  node removed from registry" vertex="1">
+          <mxGeometry height="18" width="380" x="565" y="308" as="geometry" />
+        </mxCell>
+        <mxCell id="400" parent="1" style="text;html=1;strokeColor=#aaaaaa;fillColor=#f5f5f5;align=left;verticalAlign=middle;rounded=1;fontSize=10;fontColor=#555555;" value="Note: The receiver thread is stopped when leaving a room (stop_receiver) but the socket remains open for reuse on the home screen. Both Workers are created and destroyed for each operation (connect, create/join, stats)." vertex="1">
+          <mxGeometry height="40" width="996" x="15" y="432" as="geometry" />
+        </mxCell>
+        <mxCell id="501" parent="1" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" value="" vertex="1">
+          <mxGeometry height="14" width="20" x="20" y="485" as="geometry" />
+        </mxCell>
+        <mxCell id="502" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="תהליך לקוח GUI" vertex="1">
+          <mxGeometry height="20" width="140" x="45" y="482" as="geometry" />
+        </mxCell>
+        <mxCell id="503" parent="1" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="" vertex="1">
+          <mxGeometry height="14" width="20" x="200" y="485" as="geometry" />
+        </mxCell>
+        <mxCell id="504" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="תהליך צומת / שרת" vertex="1">
+          <mxGeometry height="20" width="160" x="225" y="482" as="geometry" />
+        </mxCell>
+        <mxCell id="505" parent="1" style="rounded=1;fillColor=#b3d4f5;strokeColor=#5599cc;" value="" vertex="1">
+          <mxGeometry height="14" width="20" x="400" y="485" as="geometry" />
+        </mxCell>
+        <mxCell id="506" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="thread בתוך תהליך לקוח" vertex="1">
+          <mxGeometry height="20" width="190" x="425" y="482" as="geometry" />
+        </mxCell>
+        <mxCell id="507" parent="1" style="rounded=1;fillColor=#a8d5a2;strokeColor=#5a9e5a;" value="" vertex="1">
+          <mxGeometry height="14" width="20" x="630" y="485" as="geometry" />
+        </mxCell>
+        <mxCell id="508" parent="1" style="text;html=1;strokeColor=none;fillColor=none;fontSize=11;align=left;" value="thread בתוך תהליך צומת / שרת" vertex="1">
+          <mxGeometry height="20" width="230" x="655" y="482" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

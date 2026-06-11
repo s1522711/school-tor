@@ -45,7 +45,7 @@ for /L %%i in (1,1,%NODE_COUNT%) do (
 )
 
 timeout /t 1 /nobreak >nul
-start "Chat-Client-Tor" cmd /k "cd /d "%~dp0" && uv runServers\chat_client.py --tor --port 8001"
+echo start "Chat-Client-Tor" cmd /k "cd /d "%~dp0" && uv runServers\chat_client.py --tor --port 8001"
 
 echo.
 echo All components running. Press any key to stop everything...

@@ -155,14 +155,14 @@ def aes_decrypt(key: bytes, ciphertext: bytes) -> bytes:
 
 # ── Tor circuit ───────────────────────────────────────────────────────────────
 
-def get_nodes(dir_host: str, dir_port: int) -> list:
+def get_nodes(dir_host: str, dir_port: int) -> dict:
     """
-    Query the directory server for the list of registered relay nodes.
+    Query the directory server for the registered relay nodes, grouped by type.
 
     How it works:
         Opens a short-lived TCP connection to the directory server, sends
         GET_NODES, parses the JSON response, closes the socket, and returns
-        the list. Each node dict contains: {node_type, host, port, public_key}.
+        the dict. Each node dict contains: {node_type, host, port, public_key}.
 
     Why it exists:
         The directory server is the only bootstrap point that knows which
@@ -171,7 +171,7 @@ def get_nodes(dir_host: str, dir_port: int) -> list:
         for each node.
 
     Returns:
-        list[dict] — all registered relay nodes.
+        dict[str, list[dict]] — nodes grouped by type: {'entry': [...], 'middle': [...], 'exit': [...]}.
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.connect((dir_host, dir_port))
@@ -181,14 +181,14 @@ def get_nodes(dir_host: str, dir_port: int) -> list:
     return resp['nodes']
 
 
-def pick_nodes(nodes: list) -> tuple:
+def pick_nodes(nodes: dict) -> tuple:
     """
     Randomly select one entry, one middle, and one exit node.
 
     How it works:
-        Groups the flat node list by 'node_type', then calls random.choice()
-        on each group. Raises RuntimeError if any type is absent so the caller
-        receives a clear error rather than a KeyError.
+        Calls random.choice() on each type's list from the grouped dict.
+        Raises RuntimeError if any type is absent so the caller receives a
+        clear error rather than a KeyError.
 
     Why it exists:
         Randomising selection makes traffic analysis harder — a network-level
@@ -200,18 +200,15 @@ def pick_nodes(nodes: list) -> tuple:
     Raises:
         RuntimeError — if any node type is missing from the directory.
     """
-    by_type = {}
-    for n in nodes:
-        by_type.setdefault(n['node_type'], []).append(n)
-    missing = [t for t in ('entry', 'middle', 'exit') if not by_type.get(t)]
+    missing = [t for t in ('entry', 'middle', 'exit') if not nodes.get(t)]
     if missing:
         types = ', '.join(missing)
         noun  = 'nodes' if len(missing) > 1 else 'node'
         raise RuntimeError(f"No {types} {noun} available — a node may be down, try again shortly")
     return (
-        random.choice(by_type['entry']),
-        random.choice(by_type['middle']),
-        random.choice(by_type['exit']),
+        random.choice(nodes['entry']),
+        random.choice(nodes['middle']),
+        random.choice(nodes['exit']),
     )
 
 

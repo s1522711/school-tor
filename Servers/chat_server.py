@@ -389,7 +389,7 @@ class Room:
         Returns:
             list[socket] — snapshot of matching connections.
         """
-        return [c for c in self.clients if c is not exclude_conn]
+        return [ c for c in self.clients if c is not exclude_conn]
 
     def is_empty(self) -> bool:
         """

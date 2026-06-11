@@ -1,4 +1,4 @@
-"""Home screen — connection settings, server stats, create/join room."""
+"""Home screen: connection settings, server stats, create/join room."""
 
 import threading
 import customtkinter as ctk
@@ -55,14 +55,14 @@ class HomeScreen(ctk.CTkFrame):
         self._build_ui()
 
         if self._conn is not None:
-            # Returning from a chat room — reuse the open connection
+            # Returning from a chat room, reuse the open connection
             self._mark_connected()
             self._schedule_stats_refresh(delay=0)
         else:
             self._set_status("Fill in connection settings and click Connect.")
             self._set_room_buttons(False)
 
-    # ── Layout ────────────────────────────────────────────────────────────────
+    # LAYOUT AND UI BUILDING
 
     def _build_ui(self):
         """
@@ -70,7 +70,7 @@ class HomeScreen(ctk.CTkFrame):
 
         How it works:
             Sets up a 2-column grid: column 0 is fixed-width (240 px) for the
-            stats panel; column 1 expands to fill the remaining space. Three
+            stats panel, column 1 expands to fill the remaining space. Three
             rows: top bar (fixed), main content (expands), status bar (fixed).
             Delegates to four private build methods for each section.
 
@@ -173,7 +173,7 @@ class HomeScreen(ctk.CTkFrame):
             Iterates the four Dir Host/Port widgets and calls grid() (to show)
             or grid_remove() (to hide) based on the checkbox state. If a
             connection is currently open and the setting changed, updates the
-            status label to prompt the user to reconnect — the existing
+            status label to prompt the user to reconnect, the existing
             connection still uses the old settings and must be replaced.
 
         Why it exists:
@@ -187,7 +187,7 @@ class HomeScreen(ctk.CTkFrame):
                 w.grid()
             else:
                 w.grid_remove()
-        # Settings changed — prompt reconnect
+        # Settings changed, prompt reconnect
         if self._conn is not None:
             self._conn_status_var.set("Settings changed — reconnect to apply")
             self._conn_status_label.configure(text_color=("gray50", "gray60"))
@@ -255,7 +255,7 @@ class HomeScreen(ctk.CTkFrame):
         How it works:
             Creates an outer transparent frame in column 1 with two sub-frames
             stacked vertically (weight=1 each, so they share the available
-            height equally). The top sub-frame holds the Create Room form; the
+            height equally). The top sub-frame holds the Create Room form, the
             bottom holds the Join Room form (which has an additional Room Code
             field). Each form has a username entry and an action button.
             Stores references to the buttons so _set_room_buttons() can enable
@@ -272,7 +272,7 @@ class HomeScreen(ctk.CTkFrame):
         outer.grid_rowconfigure(1, weight=1)
         outer.grid_columnconfigure(0, weight=1)
 
-        # ── Create Room ──────────────────────────────────────────────────────
+        # CREATE ROOM
         create = ctk.CTkFrame(outer, corner_radius=10)
         create.grid(row=0, column=0, sticky="nsew", pady=(0, 6))
 
@@ -290,7 +290,7 @@ class HomeScreen(ctk.CTkFrame):
             create, text="Create Room", command=self._do_create)
         self._create_btn.pack(fill="x", padx=16, pady=(0, 16))
 
-        # ── Join Room ────────────────────────────────────────────────────────
+        # JOIN ROOM
         join = ctk.CTkFrame(outer, corner_radius=10)
         join.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
 
@@ -342,7 +342,7 @@ class HomeScreen(ctk.CTkFrame):
             main thread (always the case here — callers use self.after(0, ...)).
 
         Why it exists:
-            Centralises the "error → red, info → grey" logic so callers don't
+            Centralises the "error: red, info: grey" logic so callers don't
             need to manage colours themselves.
 
         Args:
@@ -352,7 +352,7 @@ class HomeScreen(ctk.CTkFrame):
         color = _RED if error else ("gray40", "gray70")
         self._status_label.configure(text=text, text_color=color)
 
-    # ── Connection management ─────────────────────────────────────────────────
+    # CONNECTION MANAGEMENT
 
     def _get_params(self):
         """
@@ -399,7 +399,7 @@ class HomeScreen(ctk.CTkFrame):
             buttons to prevent double-clicks. Clears the stats display to "—".
 
             Closes any existing connection on a background thread (closing a
-            TorSocket blocks briefly for TCP teardown; doing it off the main
+            TorSocket blocks briefly for TCP teardown, doing it off the main
             thread prevents the UI from freezing).
 
             Starts a worker thread that calls _get_params(), then
@@ -534,7 +534,7 @@ class HomeScreen(ctk.CTkFrame):
         self._join_btn.configure(state=state)
         self._refresh_btn.configure(state=state)
 
-    # ── Stats ─────────────────────────────────────────────────────────────────
+    # STATS
 
     def _schedule_stats_refresh(self, delay: int = _STATS_INTERVAL_MS):
         """
@@ -591,7 +591,7 @@ class HomeScreen(ctk.CTkFrame):
 
             Worker thread:
                 1. Sends GetStats over the existing connection.
-                2. Reads one response with recv_one() — safe because no receiver
+                2. Reads one response with recv_one(), safe because no receiver
                    thread is running (the receiver is not started on HomeScreen).
                 3. If the response is a Stats message, schedules _apply_stats
                    on the main thread via self.after(0, ...).
@@ -602,7 +602,7 @@ class HomeScreen(ctk.CTkFrame):
             The background receiver thread is not running while the user is on
             the home screen (stop_receiver() was called when leaving the chat
             room, or the receiver was never started). So recv_one() is the only
-            thread reading from the socket — no race.
+            thread reading from the socket, no race.
 
         Args:
             manual — True when triggered by the Refresh Now button (shows
@@ -639,7 +639,7 @@ class HomeScreen(ctk.CTkFrame):
         Update the four stat StringVars with values from the server response.
 
         How it works:
-            Checks winfo_exists() first — if the widget was destroyed between
+            Checks winfo_exists() first, if the widget was destroyed between
             the worker scheduling this call and Tkinter executing it, the update
             is silently skipped to avoid TclError. Iterates self._stat_vars and
             calls var.set(str(value)) for each key.
@@ -660,7 +660,7 @@ class HomeScreen(ctk.CTkFrame):
         for key, var in self._stat_vars.items():
             var.set(str(stats.get(key, "—")))
 
-    # ── Create / Join ─────────────────────────────────────────────────────────
+    # CREATE OR JOIN ROOM
 
     def _do_create(self):
         """
@@ -676,7 +676,7 @@ class HomeScreen(ctk.CTkFrame):
                 2. recv_one() reads the RoomCreated response (no receiver
                    thread running, so this is safe).
                 3. On success, schedules on_enter_room(conn, username,
-                   room_code, members) on the main thread → App.show_chat().
+                   room_code, members) on the main thread -> App.show_chat().
                 4. On error or disconnect: schedules a status bar update,
                    re-enables buttons, and reschedules the stats refresh.
 
@@ -698,6 +698,7 @@ class HomeScreen(ctk.CTkFrame):
         self._set_status("Creating room…")
         conn = self._conn
 
+        # The worker thread performs the synchronous CreateRoom request/response
         def worker():
             try:
                 conn.send_to('CreateRoom', {'my_username': username})
@@ -728,7 +729,7 @@ class HomeScreen(ctk.CTkFrame):
             Worker thread:
                 1. Sends JoinRoom with room_code and username.
                 2. recv_one() reads the RoomJoined (or Error) response.
-                3. On success, schedules on_enter_room → App.show_chat().
+                3. On success, schedules on_enter_room -> App.show_chat().
                 4. On error: schedules status update, re-enables buttons,
                    reschedules stats.
 

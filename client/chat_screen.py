@@ -23,7 +23,7 @@ class ChatScreen(ctk.CTkFrame):
         username: str,
         room_code: str,
         members: list,
-        on_leave,       # on_leave(conn) — returns the still-open connection to App
+        on_leave,       # on_leave(conn), returns the still-open connection to App
     ):
         """
         Build the chat UI, start the background receiver, and display initial state.
@@ -73,7 +73,7 @@ class ChatScreen(ctk.CTkFrame):
         self._append_system(f"Joined room {room_code}")
         self._append_system(f"Members: {', '.join(self._members)}")
 
-    # ── Layout ────────────────────────────────────────────────────────────────
+    # LAYOUT
 
     def _build_ui(self):
         """
@@ -153,7 +153,7 @@ class ChatScreen(ctk.CTkFrame):
         How it works:
             Creates an inner pane frame with two columns: column 0 (message box,
             weight=1) and column 1 (user list, fixed at 170 px). The message box
-            is a CTkTextbox in state="disabled" (read-only); the text widget's
+            is a CTkTextbox in state="disabled" (read-only), the text widget's
             internal _textbox is accessed directly to configure colour tags
             because CTkTextbox does not expose tag_configure. Five named tags
             are configured with different colours and fonts for different message
@@ -161,7 +161,7 @@ class ChatScreen(ctk.CTkFrame):
 
             The user list is a CTkScrollableFrame populated by _add_user_label()
             as UserJoined events arrive. Stores initial members from the
-            constructor. The _user_labels dict maps username → CTkLabel for O(1)
+            constructor. The _user_labels dict maps username to CTkLabel for O(1)
             lookup in _remove_user_label().
 
         Why access _textbox directly:
@@ -181,7 +181,7 @@ class ChatScreen(ctk.CTkFrame):
         pane.grid_columnconfigure(1, weight=0, minsize=170)
         pane.grid_rowconfigure(0, weight=1)
 
-        # ── Message box ──────────────────────────────────────────────────────
+        # MESSAGE BOX
         msg_frame = ctk.CTkFrame(pane, corner_radius=8)
         msg_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
         msg_frame.grid_rowconfigure(0, weight=1)
@@ -208,7 +208,7 @@ class ChatScreen(ctk.CTkFrame):
         tb.tag_configure("error",    foreground="#e05252",
                          font=("Consolas", 12))
 
-        # ── User list ─────────────────────────────────────────────────────────
+        # USER LIST
         user_frame = ctk.CTkFrame(pane, corner_radius=8, width=170)
         user_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
         user_frame.grid_propagate(False)
@@ -275,7 +275,7 @@ class ChatScreen(ctk.CTkFrame):
         )
         self._send_btn.grid(row=0, column=2, padx=(6, 12), pady=10)
 
-    # ── User list helpers ─────────────────────────────────────────────────────
+    # USER LIST HELPERS
 
     def _add_user_label(self, username: str):
         """
@@ -325,7 +325,7 @@ class ChatScreen(ctk.CTkFrame):
         if lbl:
             lbl.destroy()
 
-    # ── Message box helpers ───────────────────────────────────────────────────
+    # MESSAGE BOX HELPERS
 
     def _append(self, parts: list):
         """
@@ -333,15 +333,15 @@ class ChatScreen(ctk.CTkFrame):
 
         How it works:
             Temporarily enables the CTkTextbox (setting it back to "disabled"
-            would prevent the user from editing; state="normal" is needed to
+            would prevent the user from editing, state="normal" is needed to
             insert). For each (text, tag) pair: if tag is not None, calls
-            tb.insert("end", text, tag) to apply the colour/font tag; otherwise
+            tb.insert("end", text, tag) to apply the colour/font tag, otherwise
             calls tb.insert("end", text) for unstyled text. Re-disables the
             textbox and scrolls to the end with tb.see("end") so new messages
             are always visible.
 
         Why pairs instead of a single string:
-            A single message line may contain mixed styling — e.g., the username
+            A single message line may contain mixed styling e.g., the username
             part in blue-bold and the message text in normal white. Passing a
             list of (text, tag) pairs allows fine-grained per-run tagging within
             a single logical line.
@@ -424,7 +424,7 @@ class ChatScreen(ctk.CTkFrame):
             File data can be megabytes of base64. We do not store it in self
             to avoid accumulating large strings in memory for every received
             file. The lambda captures a reference to the string at the moment
-            the button is created; clicking Save later decodes and writes it.
+            the button is created, clicking Save later decodes and writes it.
 
         Args:
             sender    — display name of the file sender.
@@ -476,7 +476,7 @@ class ChatScreen(ctk.CTkFrame):
         """
         self._append([(f"  Error: {text}\n", "error")])
 
-    # ── Incoming message handler ──────────────────────────────────────────────
+    # INCOMING MESSAGE HANDLERS
 
     def _handle_message(self, msg_type: str, data: dict):
         """
@@ -494,14 +494,14 @@ class ChatScreen(ctk.CTkFrame):
             UserLeft        — removes the username from the user list, appends
                              a system message.
             RoomLeft        — the server confirmed the user has left (e.g. kicked
-                             or the room was closed); calls _cleanup_and_leave().
+                             or the room was closed), calls _cleanup_and_leave().
             Stats           — formats and appends a system message with all four
                              counters.
             Error           — appends a red error message.
 
         Why always on the main thread:
             Tkinter is not thread-safe. All widget updates (insert, configure,
-            destroy, etc.) must run on the thread that created the widgets — the
+            destroy, etc.) must run on the thread that created the widgets, the
             main thread. The lambda in start_receiver wraps every call in
             self.after(0, ...) to ensure this.
 
@@ -552,7 +552,7 @@ class ChatScreen(ctk.CTkFrame):
         Handle an unexpected server disconnect while in a chat room.
 
         How it works:
-            Checks _leaving first — if True, the disconnect was triggered by
+            Checks _leaving first, if True, the disconnect was triggered by
             _do_leave() or _cleanup_and_leave(), which already handled the UI
             transition. In that case, silently returns to avoid a spurious error.
 
@@ -578,7 +578,7 @@ class ChatScreen(ctk.CTkFrame):
         self._send_btn.configure(state="disabled")
         self._msg_entry.configure(state="disabled")
 
-    # ── Actions ───────────────────────────────────────────────────────────────
+    # ACTIONS
 
     def _copy_room_code(self):
         """
@@ -590,7 +590,7 @@ class ChatScreen(ctk.CTkFrame):
             copy so the user knows it succeeded.
 
         Why it exists:
-            The room code is a UUID (e.g. "3f1a9c4d-...") — too long to read
+            The room code is a UUID (e.g. "3f1a9c4d-..."), too long to read
             aloud. Users share it by copying and pasting. A one-click copy
             button removes friction and prevents transcription errors.
         """
@@ -605,17 +605,17 @@ class ChatScreen(ctk.CTkFrame):
         How it works:
             Reads and clears the message entry. Returns early if the text is
             empty (prevents sending blank messages). Appends the message locally
-            with self_tag (green) immediately — this gives instant visual
+            with self_tag (green) immediately, this gives instant visual
             feedback without waiting for the network round-trip.
 
             Worker thread: calls conn.send_to('SendMessage', ...). For a Tor
-            connection, this blocks for the full circuit round-trip; running it
+            connection, this blocks for the full circuit round-trip, running it
             on a worker thread prevents the GUI from freezing. On exception,
             schedules an error message on the main thread.
 
         Why display before the send completes:
             In direct mode the send is nearly instant and the local display acts
-            as confirmation. In Tor mode the circuit round-trip may take 100–500 ms;
+            as confirmation. In Tor mode the circuit round-trip may take 100–500 ms,
             showing the message immediately makes the chat feel responsive rather
             than sluggish. If the send fails, the error message appears after.
         """
@@ -642,13 +642,13 @@ class ChatScreen(ctk.CTkFrame):
             no file is selected (user cancelled). Reads the file, base64-encodes
             the raw bytes, and records the human-readable size. Appends a
             "Sending..." system message. Worker thread sends SendFile with the
-            filename and base64 filedata. On success, appends a "Sent" message;
+            filename and base64 filedata. On success, appends a "Sent" message,
             on failure, appends an error.
 
         Why base64:
             JSON is UTF-8 text and cannot contain arbitrary bytes. Base64 encodes
             any binary file as a safe ASCII string. The receiving side (chat server
-            → other clients) passes the filedata string through unchanged;
+            -> other clients) passes the filedata string through unchanged,
             the recipient calls base64.b64decode() in _save_file().
 
         Why run the send on a worker thread:
@@ -732,13 +732,13 @@ class ChatScreen(ctk.CTkFrame):
                 1. Sends LeaveRoom to the server (the server broadcasts UserLeft
                    to remaining members and sends RoomLeft back to this client).
                 2. Calls conn.stop_receiver() to stop the receiver thread.
-                   The socket stays open — HomeScreen will reuse it for stats.
-                3. Schedules on_leave(conn) on the main thread →
+                   The socket stays open, HomeScreen will reuse it for stats.
+                3. Schedules on_leave(conn) on the main thread ->
                    App.show_home(conn=conn), which creates HomeScreen with the
                    still-open connection.
 
         Why stop_receiver before on_leave:
-            on_leave() → show_home() → HomeScreen() runs on the main thread.
+            on_leave() -> show_home() -> HomeScreen() runs on the main thread.
             HomeScreen may immediately call recv_one() to fetch stats. If the
             receiver thread is still running, it could steal that stats response,
             causing recv_one() to block indefinitely. Stopping the receiver first
@@ -758,7 +758,7 @@ class ChatScreen(ctk.CTkFrame):
                 self._conn.send_to('LeaveRoom', {})
             except Exception:
                 pass
-            # Stop receiver but keep socket open — home screen will reuse it
+            # Stop receiver but keep socket open, home screen will reuse it
             self._conn.stop_receiver()
             self.after(0, lambda: self._on_leave(self._conn))
 
@@ -770,11 +770,11 @@ class ChatScreen(ctk.CTkFrame):
 
         How it works:
             Sets _leaving=True, stops the receiver without sending LeaveRoom
-            (the server already knows this client left — sending again would
+            (the server already knows this client left, sending again would
             produce an error), and calls on_leave(conn) on the main thread.
 
         Why no LeaveRoom message:
-            _cleanup_and_leave is called when the server sends RoomLeft — the
+            _cleanup_and_leave is called when the server sends RoomLeft, the
             server has already removed this client from the room. Sending
             LeaveRoom again would arrive after the client is no longer in any
             room and produce a "Not in a room" error response.

@@ -8,8 +8,8 @@ import json
 import threading
 import time
 
-nodes = []
-nodes_lock = threading.Lock()
+nodes = [] # list of dicts: {node_type, host, port, public_key, fail_count}
+nodes_lock = threading.Lock() # protects the nodes list from concurrent access by the main thread and the health check thread
 
 _CHECK_INTERVAL = 10   # seconds between health check rounds
 _MAX_FAILURES   = 3    # consecutive failures before a node is removed
@@ -20,34 +20,29 @@ def recv_msg(sock):
     Read one complete length-prefixed message from a TCP socket.
 
     How it works:
-        TCP is a stream protocol — it does not preserve message boundaries on
-        its own. To know where one message ends and the next begins, every
-        message in this system is preceded by a 4-byte big-endian integer that
-        states the number of payload bytes that follow.
-
-        The function first reads exactly 4 bytes (looping because a single
-        sock.recv() call may return fewer than requested), converts those bytes
-        to an integer `length`, then reads exactly `length` more bytes in the
-        same loop-until-complete fashion.
+        Reads a 4-byte big-endian header to learn the payload size, then reads
+        exactly that many bytes, looping in both cases because a single recv()
+        call on a TCP stream can return fewer bytes than requested.
+        Returns None on clean EOF (the client disconnected).
 
     Why it exists:
-        Without framing, a receiver has no way to tell how many bytes belong to
-        a given message — two messages could arrive in the same recv() call, or
-        one message could be split across many calls. This function hides that
-        complexity and always returns a single, complete message payload.
+        TCP is a stream protocol. Without explicit framing, two successive JSON
+        messages could arrive fused in one recv() call, or a single message
+        could be split across multiple calls. This function makes the chat
+        server completely independent of packet boundaries.
 
     Returns:
-        bytes — the raw payload of the message, or None if the socket closed.
+        bytes — the raw JSON payload, or None if the socket closed.
     """
-    raw = b''
-    while len(raw) < 4:
-        chunk = sock.recv(4 - len(raw))
+    header = b''
+    while len(header) < 4: # loop until we have the full 4-byte header
+        chunk = sock.recv(4 - len(header))
         if not chunk:
             return None
-        raw += chunk
-    length = int.from_bytes(raw, 'big')
+        header += chunk
+    length = int.from_bytes(header, 'big') # parse the length from the header
     data = b''
-    while len(data) < length:
+    while len(data) < length: # loop until we have the full payload
         chunk = sock.recv(length - len(data))
         if not chunk:
             return None
@@ -57,22 +52,22 @@ def recv_msg(sock):
 
 def send_msg(sock, data):
     """
-    Send data over a TCP socket with a 4-byte big-endian length prefix.
+    Send data over TCP with a 4-byte big-endian length prefix.
 
     How it works:
-        Accepts a dict (serialised to JSON), a str (encoded to UTF-8), or raw
-        bytes. Prepends len(data).to_bytes(4, 'big') and calls sendall() so
-        the OS flushes the entire payload in one shot.
+        Accepts dict (JSON bytes), str (UTF-8 bytes), or raw bytes.
+        Prepends the 4-byte length and calls sendall() which loops until all
+        bytes have been handed to the kernel, even if the send buffer is full.
 
     Why it exists:
-        Mirrors recv_msg — together they implement the framing protocol used
-        by every component in the system. Using sendall() (rather than send())
-        guarantees the whole message is written even if the kernel buffer is
-        temporarily full.
+        The paired receiving side (recv_msg) expects this exact framing.
+        sendall() is used rather than send() because a broken socket or full
+        buffer could cause send() to write only a partial payload without
+        raising an exception, silently corrupting the stream.
     """
-    if isinstance(data, dict):
+    if isinstance(data, dict): # convert dict to JSON bytes
         data = json.dumps(data).encode()
-    elif isinstance(data, str):
+    elif isinstance(data, str): # convert str to UTF-8 bytes
         data = data.encode()
     sock.sendall(len(data).to_bytes(4, 'big') + data)
 
@@ -89,7 +84,7 @@ def check_node(node: dict) -> bool:
         send_msg(s, {'type': 'PING'})
         raw = recv_msg(s)
         s.close()
-        if raw is None:
+        if raw is None: # clean EOF, node didn't respond
             return False
         return json.loads(raw).get('status') == 'pong'
     except Exception:
@@ -99,13 +94,13 @@ def check_node(node: dict) -> bool:
 def health_check_loop():
     """
     Background daemon thread: every _CHECK_INTERVAL seconds, ping every
-    registered node. Increment its fail_count on failure; reset to 0 on
+    registered node. Increment its fail_count on failure, reset to 0 on
     success. Remove the node once fail_count reaches _MAX_FAILURES.
     """
     while True:
         time.sleep(_CHECK_INTERVAL)
 
-        with nodes_lock:
+        with nodes_lock: # take a snapshot of the current nodes list to iterate over without holding the lock
             snapshot = [(n['host'], n['port']) for n in nodes]
 
         for host, port in snapshot:
@@ -113,21 +108,22 @@ def health_check_loop():
             # since we took the snapshot, so look it up fresh under the lock).
             with nodes_lock:
                 node = next((n for n in nodes if n['host'] == host and n['port'] == port), None)
-            if node is None:
+            if node is None: # node was removed or re-registered while we were looking, skip it
                 continue
-
+            
+            # Check if the node is alive without holding the lock.
             alive = check_node(node)
 
             with nodes_lock:
                 # Re-find by host:port in case the list changed during the check.
                 entry = next((n for n in nodes if n['host'] == host and n['port'] == port), None)
-                if entry is None:
+                if entry is None: # node was removed or re-registered while we were checking, skip it
                     continue
                 if alive:
                     entry['fail_count'] = 0
-                else:
-                    entry['fail_count'] += 1
-                    fails = entry['fail_count']
+                else: # node failed the health check, increment fail_count and remove if it exceeds the threshold
+                    entry['fail_count'] += 1 # increment fail_count on failure
+                    fails = entry['fail_count'] # read the updated fail_count for logging
                     label = f"{entry['node_type']} at {host}:{port}"
                     if fails >= _MAX_FAILURES:
                         nodes.remove(entry)
@@ -147,18 +143,18 @@ def handle_client(conn, addr):
             The node sends its type ('entry'/'middle'/'exit'), host, port, and
             RSA-2048 public key (PEM string). The handler removes any stale
             entry for the same host:port (in case the node restarted) and
-            appends the new record. This upsert approach means the list never
+            appends the new record. This replace approach means the list never
             accumulates dead entries from node restarts.
 
         GET_NODES — a client asking for the full node list.
             Returns a JSON snapshot of the entire nodes list. The client will
             then pick one entry, one middle and one exit node at random.
 
-        The connection is always closed after one request; the directory is
+        The connection is always closed after one request, the directory is
         purely request/response with no persistent state per connection.
 
     Why it exists:
-        The directory server is the bootstrap point for the whole network.
+        The directory server is the starting point for the whole network.
         Without it, clients would have no way to discover which nodes exist or
         obtain their public keys (needed for hybrid circuit-setup encryption).
 
@@ -166,16 +162,16 @@ def handle_client(conn, addr):
         conn — the accepted TCP socket for this client.
         addr — (host, port) tuple, used only for logging.
     """
-    try:
+    try: # read one message, respond, and close
         raw = recv_msg(conn)
         if not raw:
             return
-        msg = json.loads(raw)
+        msg = json.loads(raw) # parse the JSON message into a dict
 
-        if msg['type'] == 'REGISTER':
+        if msg['type'] == 'REGISTER': # a node is registering itself
             with nodes_lock:
                 # Replace existing entry for same host:port if re-registering
-                nodes[:] = [n for n in nodes if not (n['host'] == msg['host'] and n['port'] == msg['port'])]
+                nodes[:] = [n for n in nodes if not (n['host'] == msg['host'] and n['port'] == msg['port'])] # remove any existing entry for the same host:port (in case of node restart)
                 nodes.append({
                     'node_type':  msg['node_type'],
                     'host':       msg['host'],
@@ -186,15 +182,15 @@ def handle_client(conn, addr):
             print(f"[DIR] Registered {msg['node_type']} node at {msg['host']}:{msg['port']}")
             send_msg(conn, {'status': 'ok'})
 
-        elif msg['type'] == 'GET_NODES':
+        elif msg['type'] == 'GET_NODES': # a client is requesting the node list
             with nodes_lock:
-                by_type: dict[str, list] = {}
-                for n in nodes:
-                    entry = {k: v for k, v in n.items() if k != 'fail_count'}
-                    by_type.setdefault(n['node_type'], []).append(entry)
+                by_type: dict[str, list] = {} # group nodes by type, stripping the fail_count field since it's internal state that clients don't need to see
+                for node in nodes:
+                    entry = {key: value for key, value in node.items() if key != 'fail_count'}
+                    by_type.setdefault(node['node_type'], []).append(entry)
             send_msg(conn, {'nodes': by_type})
 
-    except Exception as e:
+    except Exception as e: # catch all exceptions to prevent one bad client from crashing the server, log the error and close the connection
         print(f"[DIR] Error handling {addr}: {e}")
     finally:
         conn.close()
@@ -202,12 +198,12 @@ def handle_client(conn, addr):
 
 def main():
     """
-    Entry point — bind, listen, and dispatch one thread per connection.
+    Entry point: bind, listen, and dispatch one thread per connection.
 
     How it works:
         Creates a TCP server socket with SO_REUSEADDR (so restarts don't have
         to wait for TIME_WAIT to expire). Sets a 1-second accept() timeout so
-        the KeyboardInterrupt check in the outer while-loop fires promptly —
+        the KeyboardInterrupt check in the outer while-loop fires promptly,
         without the timeout, accept() would block indefinitely and Ctrl+C
         would not be noticed until a new connection arrived.
 
@@ -216,10 +212,11 @@ def main():
         thread exits, so no explicit thread cleanup is needed on shutdown.
 
     Why it exists:
-        This is a standalone process — it needs its own accept loop. The
-        settimeout + try/except pattern is the standard Python idiom for a
+        This is a standalone process, it needs its own accept loop. The
+        settimeout + try/except pattern is the standard Python template for a
         server that can be stopped cleanly with Ctrl+C.
     """
+    # Configuration: bind to all interfaces on port 8000
     HOST = '0.0.0.0'
     PORT = 8000
 
@@ -230,10 +227,11 @@ def main():
     server.settimeout(1.0)
     print(f"[DIR] Directory server listening on {HOST}:{PORT}")
 
+    # Start the health check thread as a daemon so it doesn't block shutdown.
     checker = threading.Thread(target=health_check_loop, daemon=True)
     checker.start()
 
-    try:
+    try: # main accept loop, spawns a new thread for each incoming connection
         while True:
             try:
                 conn, addr = server.accept()
@@ -241,7 +239,7 @@ def main():
                 continue
             t = threading.Thread(target=handle_client, args=(conn, addr), daemon=True)
             t.start()
-    except KeyboardInterrupt:
+    except KeyboardInterrupt: # allow Ctrl+C to stop the server cleanly
         print("\n[DIR] Shutting down...")
     finally:
         server.close()

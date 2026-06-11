@@ -19,7 +19,7 @@ from Crypto.Random import get_random_bytes
 from Crypto.Util.Padding import pad, unpad
 
 
-# ── Wire helpers ──────────────────────────────────────────────────────────────
+# comm helpers
 
 def recv_msg(sock):
     """
@@ -34,22 +34,22 @@ def recv_msg(sock):
     Why it exists:
         Used by Connection.recv_one() and the direct-mode receiver. Accepting
         either a real socket or a TorSocket makes the caller agnostic to the
-        underlying transport — TorSocket.recv() drains _buf just like a real
+        underlying transport, TorSocket.recv() drains _buf just like a real
         socket would return bytes from the kernel buffer.
 
     Returns:
-        dict (parsed) — actually returns raw bytes; callers parse JSON.
+        dict (parsed) — actually returns raw bytes, callers parse JSON.
         None          — on disconnect / circuit closed.
     """
     header = b''
-    while len(header) < 4:
+    while len(header) < 4: # loop until we have the full 4-byte header
         chunk = sock.recv(4 - len(header))
         if not chunk:
             return None
         header += chunk
-    length = int.from_bytes(header, 'big')
+    length = int.from_bytes(header, 'big') # parse the length from the header
     data = b''
-    while len(data) < length:
+    while len(data) < length: # loop until we have the full payload
         chunk = sock.recv(length - len(data))
         if not chunk:
             return None
@@ -62,9 +62,9 @@ def send_msg(sock, data):
     Send data with a 4-byte big-endian length prefix over sock.
 
     How it works:
-        Serialises dict → JSON bytes, str → UTF-8 bytes. Prepends 4-byte
+        Serialises dict as JSON bytes, str as UTF-8 bytes. Prepends 4-byte
         big-endian length and calls sendall(). For a TorSocket, sendall()
-        triggers the full circuit round-trip (encrypt → RELAY → decrypt →
+        triggers the full circuit round-trip (encrypt -> RELAY -> decrypt ->
         buffer) transparently.
 
     Why it exists:
@@ -99,7 +99,7 @@ def send_to(sock, msg_type: str, data: dict):
     send_msg(sock, {'type': msg_type, 'data': data})
 
 
-# ── AES helpers ───────────────────────────────────────────────────────────────
+# AES helpers
 
 def aes_encrypt(key: bytes, plaintext: bytes) -> bytes:
     """
@@ -138,8 +138,8 @@ def aes_decrypt(key: bytes, ciphertext: bytes) -> bytes:
 
     Why it exists:
         Inverse of aes_encrypt. Called in TorSocket to peel the three AES
-        layers off a RELAY_RESPONSE in order K1 → K2 → K3 (outermost first),
-        the reverse of the K3 → K2 → K1 wrapping order used when sending.
+        layers off a RELAY_RESPONSE in order K1 -> K2 -> K3 (outermost first),
+        the reverse of the K3 -> K2 -> K1 wrapping order used when sending.
 
     Args:
         key        — 16-byte AES-128 key.
@@ -153,7 +153,7 @@ def aes_decrypt(key: bytes, ciphertext: bytes) -> bytes:
     return unpad(cipher.decrypt(ct), AES.block_size)
 
 
-# ── Tor circuit ───────────────────────────────────────────────────────────────
+# TOR CIRCUIT
 
 def get_nodes(dir_host: str, dir_port: int) -> dict:
     """
@@ -191,7 +191,7 @@ def pick_nodes(nodes: dict) -> tuple:
         clear error rather than a KeyError.
 
     Why it exists:
-        Randomising selection makes traffic analysis harder — a network-level
+        Randomising selection makes traffic analysis harder, a network-level
         adversary watching some nodes cannot predict which circuit will be used.
 
     Returns:
@@ -217,7 +217,7 @@ def make_setup_payload(pub_pem: str, inner: dict) -> dict:
     Hybrid-encrypt a routing dict for one relay node.
 
     How it works:
-        1. Generates a random 16-byte setup_key (ephemeral AES key).
+        1. Generates a random 16-byte setup_key (one time use AES key).
         2. RSA-OAEP encrypts setup_key with pub_pem (the node's public key).
            Only the node with the matching RSA private key can recover it.
         3. AES-CBC encrypts JSON(inner) with setup_key.
@@ -228,7 +228,7 @@ def make_setup_payload(pub_pem: str, inner: dict) -> dict:
         solves this: only the 16-byte setup_key goes through RSA.
 
     Why it exists:
-        Called three times in build_circuit (once per hop, exit → middle → entry)
+        Called three times in build_circuit (once per hop, exit -> middle -> entry)
         to produce the nested onion payload. The nesting is what gives each node
         just enough information (its own key + the next hop address + the opaque
         blob for the next node) without revealing anything else.
@@ -263,14 +263,14 @@ def build_circuit(entry, middle, exit_node, dest_host: str, dest_port: int):
         3. Connects TCP to the entry node and sends CIRCUIT_SETUP.
            Entry decrypts its layer, forwards middle_payload to middle, middle
            forwards exit_payload to exit. Exit connects to dest_host:dest_port
-           and sends 'ok' back. The 'ok' bubbles entry → client.
+           and sends 'ok' back. The 'ok' bubbles entry -> client.
         4. Returns the five values TorSocket needs to operate.
 
     Why it exists:
         After this function, the caller has a single TCP socket to the entry
         node and three relay keys. Every subsequent RELAY message is sent and
         received through that one socket using those keys. The circuit persists
-        for the session lifetime; no per-message handshake is needed.
+        for the session lifetime, no per-message handshake is needed.
 
     Returns:
         (circuit_id: str, K1: bytes, K2: bytes, K3: bytes, entry_sock: socket)
@@ -315,7 +315,7 @@ def build_circuit(entry, middle, exit_node, dest_host: str, dest_port: int):
     return circuit_id, K1, K2, K3, entry_sock
 
 
-# ── TorSocket ─────────────────────────────────────────────────────────────────
+# TOR SOCKET
 
 class TorSocket:
     """
@@ -364,19 +364,19 @@ class TorSocket:
         Send one framed message through the circuit and buffer the response.
 
         How it works:
-            1. Strips the 4-byte length prefix (data[4:]) — send_msg adds the
+            1. Strips the 4-byte length prefix (data[4:]): send_msg adds the
                frame, but only the raw JSON payload should travel the circuit.
                The exit node's send_msg re-adds framing for the chat server.
             2. Under _lock:
-               a. Triple-encrypts: K3 → K2 → K1 (innermost to outermost).
+               a. Triple-encrypts: K3 -> K2 -> K1 (innermost to outermost).
                b. Sends RELAY to entry node.
                c. Reads RELAY_RESPONSE (blocks until round-trip completes).
-               d. Triple-decrypts: K1 → K2 → K3.
+               d. Triple-decrypts: K1 -> K2 -> K3.
                e. If response is non-empty, prepends 4-byte frame and appends
                   to _buf so recv_msg(self) can drain it.
 
         Why the frame is stripped then re-added:
-            Without stripping, the exit node's send_msg would add a *second*
+            Without stripping, the exit node's send_msg would add a second
             4-byte frame to the already-framed data, causing the chat server's
             recv_msg to misread the message length. Stripping before encrypting
             and re-adding after decrypting makes the framing transparent.
@@ -384,8 +384,8 @@ class TorSocket:
         Args:
             data — the framed bytes that send_msg produced (4B header + JSON).
         """
-        payload = data[4:]  # strip frame; exit node's send_msg re-adds it
-        with self._lock:
+        payload = data[4:]  # strip frame, exit node's send_msg re-adds it
+        with self._lock: # protect the entire send/poll sequence from race conditions
             enc = aes_encrypt(self._K3, payload)
             enc = aes_encrypt(self._K2, enc)
             enc = aes_encrypt(self._K1, enc)
@@ -404,7 +404,7 @@ class TorSocket:
             dec = aes_decrypt(self._K1, dec)
             dec = aes_decrypt(self._K2, dec)
             dec = aes_decrypt(self._K3, dec)
-            if dec:
+            if dec: # only buffer if non-empty, empty responses are used by poll() to indicate no pending messages
                 self._buf += len(dec).to_bytes(4, 'big') + dec
 
     def recv(self, n: int) -> bytes:
@@ -440,7 +440,7 @@ class TorSocket:
 
         How it works:
             Under _lock:
-            1. Triple-encrypts empty bytes (b''): K3 → K2 → K1. PKCS7 pads
+            1. Triple-encrypts empty bytes (b''): K3 -> K2 -> K1. PKCS7 pads
                b'' to 16 bytes before encryption, so the result is a valid
                AES-CBC ciphertext (32 bytes: IV + one block).
             2. Sends RELAY with the encrypted empty payload.
@@ -448,8 +448,8 @@ class TorSocket:
                to dest_sock, and instead calls select.select(dest_sock, 0.5s).
                If data is ready within 0.5 s, it reads one message and returns
                it encrypted. Otherwise returns empty bytes.
-            4. Client decrypts K1 → K2 → K3. If empty → returns None.
-               If non-empty → JSON-parses and returns the message dict.
+            4. Client decrypts K1 -> K2 -> K3. If empty -> returns None.
+               If non-empty -> JSON-parses and returns the message dict.
 
         Why the poll mechanism exists:
             A Tor circuit is inherently request/response. The server cannot
@@ -484,9 +484,9 @@ class TorSocket:
             dec = aes_decrypt(self._K1, dec)
             dec = aes_decrypt(self._K2, dec)
             dec = aes_decrypt(self._K3, dec)
-        if not dec:
+        if not dec: # empty response means no pending messages, return None to the caller
             return None
-        try:
+        try: # if non-empty, parse and return the message dict
             return json.loads(dec)
         except json.JSONDecodeError:
             return None
@@ -498,7 +498,7 @@ class TorSocket:
         How it works:
             Calls self._entry.close() which triggers TCP FIN and causes the
             entry node's recv_msg to return None, triggering the cascade teardown
-            (entry closes next_sock → middle closes next_sock → exit closes
+            (entry closes next_sock -> middle closes next_sock -> exit closes
             dest_sock).
 
         Why it exists:
@@ -509,13 +509,13 @@ class TorSocket:
         self._entry.close()
 
 
-# ── Connection ────────────────────────────────────────────────────────────────
+# CONNECTION
 
 class Connection:
     """
     Wraps a raw socket (direct mode) or TorSocket (Tor mode).
 
-    A single persistent socket is used for the entire session — stats,
+    A single persistent socket is used for the entire session: stats,
     room setup, and in-room messaging all share the same connection.
 
     start_receiver(on_message, on_disconnect)
@@ -525,7 +525,7 @@ class Connection:
 
     stop_receiver()
         Signal the receiver thread to stop and wait for it to exit (up to 2 s).
-        The socket stays open; send_to / recv_one can be used again afterwards.
+        The socket stays open, send_to / recv_one can be used again afterwards.
 
     close()
         Stop the receiver and close the underlying socket.
@@ -542,7 +542,7 @@ class Connection:
         Why it exists:
             HomeScreen and ChatScreen interact with Connection rather than with
             a raw socket or TorSocket. This indirection means neither screen
-            needs to know which transport is active — they both call send_to(),
+            needs to know which transport is active, they both call send_to(),
             recv_one(), start_receiver(), etc. on the same API.
 
         Args:
@@ -577,7 +577,7 @@ class Connection:
 
         Why it exists:
             Single call site for sending from ChatScreen and HomeScreen. No
-            exception handling here — the caller (always a worker thread in the
+            exception handling here, the caller (always a worker thread in the
             GUI) wraps the call in try/except.
 
         Args:
@@ -621,7 +621,7 @@ class Connection:
             Creates a fresh threading.Event (_recv_stop) so stop_receiver()
             works correctly even if called multiple times. Chooses the right
             receiver implementation (_tor_receiver or _direct_receiver) based
-            on is_tor. Starts a daemon thread — daemon threads are killed
+            on is_tor. Starts a daemon thread, daemon threads are killed
             automatically when the main thread exits, so no cleanup is needed
             on process exit.
 
@@ -636,10 +636,10 @@ class Connection:
             on_disconnect — callback() called when the socket or circuit closes
                             unexpectedly.
         """
-        self._recv_stop = threading.Event()
-        target = self._tor_receiver if self._is_tor else self._direct_receiver
+        self._recv_stop = threading.Event() # create a fresh Event so the new thread doesn't see a pre-set stop condition
+        target = self._tor_receiver if self._is_tor else self._direct_receiver # choose the appropriate receiver function based on the connection type
         self._recv_thread = threading.Thread(
-            target=target, args=(on_message, on_disconnect), daemon=True)
+            target=target, args=(on_message, on_disconnect), daemon=True) # start the thread as a daemon so it doesn't block process exit, and store the Thread object so we can join it later in stop_receiver()
         self._recv_thread.start()
 
     def stop_receiver(self):
@@ -650,7 +650,7 @@ class Connection:
             Sets _recv_stop (the thread checks this flag on each iteration).
             Calls thread.join(timeout=2.0) to wait for a clean exit. The
             timeout prevents the GUI from freezing indefinitely if the thread
-            is stuck in a slow poll. Does NOT close the socket — the caller
+            is stuck in a slow poll. Does NOT close the socket, the caller
             may reuse the Connection for further sends/receives.
 
         Why the socket stays open:
@@ -681,7 +681,7 @@ class Connection:
             unexpected, not triggered by stop_receiver). This prevents a spurious
             "Disconnected" error when the user intentionally leaves a room.
 
-            Filters out Ack messages — they are only meaningful at the send layer
+            Filters out Ack messages, they are only meaningful at the send layer
             and should not be delivered to the UI.
 
         Why select() instead of closing the socket:
@@ -694,24 +694,24 @@ class Connection:
             on_message    — UI callback for non-Ack messages.
             on_disconnect — UI callback when the server closes the connection.
         """
-        while not self._recv_stop.is_set():
-            try:
+        while not self._recv_stop.is_set(): # loop until stop_receiver signals us to exit
+            try: # check if the socket is readable with a timeout, so we can exit promptly when _recv_stop is set without closing the socket
                 readable, _, _ = select.select([self._sock], [], [], 0.5)
             except Exception:
                 break
             if not readable:
                 continue
-            raw = recv_msg(self._sock)
+            raw = recv_msg(self._sock) # read one complete message (blocks until a full message arrives, but that's okay because select() guarantees it's ready)
             if raw is None:
-                if not self._recv_stop.is_set():
+                if not self._recv_stop.is_set(): # only call on_disconnect if the disconnect was unexpected (not triggered by stop_receiver)
                     on_disconnect()
                 break
-            try:
+            try: # JSON-decode the message, if it fails skip this message and continue the loop (could be a TorSocket poll response or a malformed message)
                 msg = json.loads(raw)
             except json.JSONDecodeError:
                 continue
             msg_type = msg.get('type', '')
-            if msg_type != 'Ack':
+            if msg_type != 'Ack': # filter out Ack messages, they are only relevant to the send layer and should not be delivered to the UI
                 on_message(msg_type, msg.get('data', {}))
 
     def _tor_receiver(self, on_message, on_disconnect):
@@ -725,7 +725,7 @@ class Connection:
             message. This 0.5 s timeout provides natural pacing (~2 polls/s)
             without any sleep() needed in this function.
 
-            ConnectionError from poll() means the circuit closed — calls
+            ConnectionError from poll() means the circuit closed, calls
             on_disconnect() if the stop wasn't intentional. Other exceptions
             (e.g. JSON errors inside poll) exit the loop silently.
 
@@ -733,7 +733,7 @@ class Connection:
 
         Why a separate method from _direct_receiver:
             Tor mode uses poll() instead of select + recv_msg because the
-            entire circuit round-trip (encrypt → RELAY → wait → decrypt) must
+            entire circuit round-trip (encrypt -> RELAY -> wait -> decrypt) must
             happen atomically under _lock. There is no way to use select() on
             a TorSocket because the data lives in _buf, not on a file descriptor.
 
@@ -741,16 +741,16 @@ class Connection:
             on_message    — UI callback for non-Ack messages.
             on_disconnect — UI callback on circuit failure.
         """
-        while not self._recv_stop.is_set():
-            try:
+        while not self._recv_stop.is_set(): # loop until stop_receiver signals us to exit
+            try: # poll() sends an empty relay and waits up to 0.5 s for a pushed message, returns None if no message pending, or raises ConnectionError if the circuit is dead
                 msg = self._sock.poll()
-            except ConnectionError:
+            except ConnectionError: # circuit disconnected (could be triggered by stop_receiver or by an unexpected failure), call on_disconnect only if the stop wasn't intentional
                 if not self._recv_stop.is_set():
                     on_disconnect()
                 break
             except Exception:
                 break
-            if msg is not None:
+            if msg is not None: # if poll() returns a message dict, filter out Acks and deliver the rest to the UI
                 msg_type = msg.get('type', '')
                 if msg_type != 'Ack':
                     on_message(msg_type, msg.get('data', {}))
@@ -778,7 +778,7 @@ class Connection:
             pass
 
 
-# ── Convenience functions ─────────────────────────────────────────────────────
+# CONVIENIENCE FUNCTIONS
 
 def connect_direct(host: str, port: int) -> Connection:
     """

@@ -13,7 +13,7 @@ Optional:
     --dir-port  directory server port (default 8000)
 
 Circuit setup payload uses hybrid encryption:
-  - A random 16-byte setup key is RSA-OAEP encrypted with this node's public key.
+  - A random 16-byte (128-bit) setup key is RSA-OAEP encrypted with this node's public key.
   - The actual routing data (circuit AES key + next hop info) is AES-CBC encrypted
     with that setup key.
 
@@ -38,39 +38,36 @@ from Crypto.Random import get_random_bytes
 from Crypto.Util.Padding import pad, unpad
 
 
-# ── Socket helpers ────────────────────────────────────────────────────────────
+# socket helpers
 
 def recv_msg(sock):
     """
     Read one complete length-prefixed message from a TCP socket.
 
     How it works:
-        Reads a 4-byte big-endian header that tells us the payload size, then
-        reads exactly that many payload bytes. Both reads loop because a single
-        sock.recv() call can return fewer bytes than requested — TCP is a stream,
-        not a datagram protocol, so partial reads are normal under load.
-
-        Returning None on any recv() that yields empty bytes signals the caller
-        that the remote side has closed the connection gracefully (EOF). The
-        caller's loop then breaks and triggers connection teardown.
+        Reads a 4-byte big-endian header to learn the payload size, then reads
+        exactly that many bytes, looping in both cases because a single recv()
+        call on a TCP stream can return fewer bytes than requested.
+        Returns None on clean EOF (the client disconnected).
 
     Why it exists:
-        The same framing protocol (4-byte length + payload) is used by every
-        component in the system. Centralising the logic here avoids bugs where
-        different parts of the node might handle partial reads differently.
+        TCP is a stream protocol. Without explicit framing, two successive JSON
+        messages could arrive fused in one recv() call, or a single message
+        could be split across multiple calls.
+        The 4-byte length prefix ensures we know exactly where each message ends.
 
     Returns:
-        bytes — the raw message payload, or None if the socket closed.
+        bytes — the raw JSON payload, or None if the socket closed.
     """
     header = b''
-    while len(header) < 4:
+    while len(header) < 4: # loop until we have the full 4-byte header
         chunk = sock.recv(4 - len(header))
         if not chunk:
             return None
         header += chunk
-    length = int.from_bytes(header, 'big')
+    length = int.from_bytes(header, 'big') # parse the length from the header
     data = b''
-    while len(data) < length:
+    while len(data) < length: # loop until we have the full payload
         chunk = sock.recv(length - len(data))
         if not chunk:
             return None
@@ -80,28 +77,27 @@ def recv_msg(sock):
 
 def send_msg(sock, data):
     """
-    Send a message over TCP with a 4-byte big-endian length prefix.
+    Send data over TCP with a 4-byte big-endian length prefix.
 
     How it works:
-        Accepts dict (→ JSON → UTF-8 bytes), str (→ UTF-8 bytes), or raw bytes.
-        Prepends the 4-byte payload length and calls sendall() which loops
-        internally until all bytes are passed to the kernel, preventing the
-        silent truncation that a bare send() could cause.
+        Accepts dict (JSON bytes), str (UTF-8 bytes), or raw bytes.
+        Prepends the 4-byte length and calls sendall() which loops until all
+        bytes have been handed to the kernel, even if the send buffer is full.
 
     Why it exists:
-        Paired with recv_msg to implement the system-wide framing protocol.
-        sendall() is critical in a multi-threaded server because TCP's send()
-        may return before all bytes are written when the socket send buffer
-        is close to full.
+        The paired receiving side (recv_msg) expects this exact framing.
+        sendall() is used rather than send() because a broken socket or full
+        buffer could cause send() to write only a partial payload without
+        raising an exception, silently corrupting the stream.
     """
-    if isinstance(data, dict):
+    if isinstance(data, dict): # convert dict to JSON bytes
         data = json.dumps(data).encode()
-    elif isinstance(data, str):
+    elif isinstance(data, str): # convert str to UTF-8 bytes
         data = data.encode()
     sock.sendall(len(data).to_bytes(4, 'big') + data)
 
 
-# ── AES helpers ───────────────────────────────────────────────────────────────
+# AES helpers
 
 def aes_encrypt(key: bytes, plaintext: bytes) -> bytes:
     """
@@ -112,7 +108,7 @@ def aes_encrypt(key: bytes, plaintext: bytes) -> bytes:
         Vector). AES-CBC XORs each plaintext block with the previous ciphertext
         block (or the IV for the first block) before encrypting, which means
         identical plaintexts encrypt to different ciphertexts when the IV
-        differs — critical for security. PKCS7 pads the plaintext to a 16-byte
+        differs which is critical for security. PKCS7 pads the plaintext to a 16-byte
         multiple as required by CBC mode. Returns iv + ciphertext so the
         recipient can read the IV from the first 16 bytes.
 
@@ -146,7 +142,7 @@ def aes_decrypt(key: bytes, ciphertext: bytes) -> bytes:
         padding to restore the original plaintext.
 
         If the data is corrupt or was encrypted with the wrong key, unpad()
-        will raise a ValueError — the caller's except block catches this.
+        will raise a ValueError, the caller's except block catches this.
 
     Why it exists:
         The inverse of aes_encrypt. Called in handle_relay when the node
@@ -164,12 +160,12 @@ def aes_decrypt(key: bytes, ciphertext: bytes) -> bytes:
     return unpad(cipher.decrypt(ct), AES.block_size)
 
 
-# ── Per-node state ────────────────────────────────────────────────────────────
+# Per-node state
 
 # circuits[circuit_id] = {
 #   'key':      bytes,           # this node's AES relay key
 #   'next_sock': socket | None,  # persistent connection to next hop (None for exit)
-#   'dest':     (host, port) | None,  # only for exit nodes
+#   'dest':     (host, port) | None,  # only present for exit nodes
 #   'is_exit':  bool,
 # }
 circuits: dict = {}
@@ -192,9 +188,9 @@ def dbg(label: str, data: bytes):
         calls in handle_relay line up neatly for visual comparison.
 
     Why it exists:
-        Onion encryption is opaque by design — the bytes look like noise. When
-        debugging a failing circuit, being able to see the raw bytes *before*
-        decryption and *after* decryption at each hop is invaluable for
+        Onion encryption is opaque by design, the bytes look like noise. When
+        debugging a failing circuit, being able to see the raw bytes before
+        decryption and after decryption at each hop is invaluable for
         diagnosing wrong keys, wrong order of operations, or framing bugs.
         The --debug flag enables this output without affecting normal operation.
 
@@ -209,7 +205,7 @@ def dbg(label: str, data: bytes):
     print(f"  [DBG] {label:28s} {len(data):4d}B  {preview}{suffix}")
 
 
-# ── Decrypt setup payload ─────────────────────────────────────────────────────
+# Decrypt setup payloads
 
 def decrypt_setup_payload(payload: dict) -> dict:
     """
@@ -218,14 +214,14 @@ def decrypt_setup_payload(payload: dict) -> dict:
     How it works:
         The payload has two fields:
             'encrypted_key'  — the 16-byte setup_aes_key, RSA-OAEP encrypted
-                               with *this node's* public key. Only this node's
+                               with this node's public key. Only this node's
                                RSA private key can decrypt it.
             'encrypted_data' — the routing instructions (JSON), AES-CBC
                                encrypted with setup_aes_key.
 
         Step 1: Use this node's RSA private key (rsa_key) with PKCS1_OAEP to
-                decrypt 'encrypted_key' → setup_aes_key (16 bytes).
-        Step 2: Use setup_aes_key to AES-decrypt 'encrypted_data' → raw JSON.
+                decrypt 'encrypted_key' to get setup_aes_key (16 bytes).
+        Step 2: Use setup_aes_key to AES-decrypt 'encrypted_data' to get raw JSON.
         Step 3: Parse and return the JSON dict.
 
         The inner dict contains:
@@ -237,7 +233,7 @@ def decrypt_setup_payload(payload: dict) -> dict:
     Why it exists:
         Separating RSA decryption into this function keeps handle_circuit_setup
         clean. It also makes it easy to test in isolation: a valid payload
-        should always produce a parseable inner dict; an invalid one (wrong
+        should always produce a parseable inner dict, an invalid one (wrong
         key, corrupt data) should raise an exception that handle_circuit_setup
         catches and turns into an error response.
 
@@ -257,7 +253,7 @@ def decrypt_setup_payload(payload: dict) -> dict:
     return json.loads(raw.decode())
 
 
-# ── Message handlers ──────────────────────────────────────────────────────────
+# Message handlers
 
 def handle_circuit_setup(conn, msg, local_circuits: set):
     """
@@ -271,7 +267,7 @@ def handle_circuit_setup(conn, msg, local_circuits: set):
 
            EXIT path (inner has 'dest_host'):
                Opens a persistent TCP socket to the destination server.
-               This socket (dest_sock) lives for the circuit's lifetime —
+               This socket (dest_sock) lives for the circuit's lifetime,
                the exit node reuses it for every RELAY message in this
                circuit, and the destination server's push responses arrive
                on it for the poll mechanism to pick up.
@@ -297,34 +293,36 @@ def handle_circuit_setup(conn, msg, local_circuits: set):
         client sends CIRCUIT_SETUP to the entry node, this function fires on
         the entry node, which calls it on the middle node (via a recursive
         CIRCUIT_SETUP forward), which calls it on the exit node. The 'ok'
-        responses bubble back: exit → middle → entry → client.
+        responses bubble back: exit -> middle -> entry -> client.
 
     Args:
-        conn          — socket to the *previous* hop (or the client).
+        conn          — socket to the previous hop (or the client).
         msg           — parsed CIRCUIT_SETUP message dict.
-        local_circuits — set of circuit_ids opened by this connection;
+        local_circuits — set of circuit_ids opened by this connection,
                          mutated in-place so handle_connection can clean up.
     """
     circuit_id = msg['circuit_id']
 
-    try:
+    try: # decrypt the setup payload, which contains the relay key and routing info for this node
         inner = decrypt_setup_payload(msg['payload'])
     except Exception as e:
         send_msg(conn, {'status': 'error', 'msg': f'Setup decrypt failed: {e}'})
         return
 
+    # The relay key is this node's layer of the onion for this circuit, it will be used to encrypt
     relay_key = base64.b64decode(inner['key'])
 
+    # The presence of 'dest_host' vs 'next_host' is how we distinguish exit vs entry/middle roles.
     if 'dest_host' in inner:
-        # ── Exit node ──
+        # EXIT NODE
         dest = (inner['dest_host'], inner['dest_port'])
-        try:
+        try: # open the socket to the destination
             dest_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             dest_sock.connect(dest)
         except Exception as e:
             send_msg(conn, {'status': 'error', 'msg': f'Cannot reach destination: {e}'})
             return
-        with circuits_lock:
+        with circuits_lock: # store the circuit with is_exit=True and no next_sock
             circuits[circuit_id] = {
                 'key': relay_key,
                 'next_sock': None,
@@ -332,17 +330,17 @@ def handle_circuit_setup(conn, msg, local_circuits: set):
                 'dest': dest,
                 'is_exit': True,
             }
-        local_circuits.add(circuit_id)
+        local_circuits.add(circuit_id) # track this circuit for cleanup on disconnect
         print(f"[{node_type.upper()}] Circuit {circuit_id[:8]}  dest={dest[0]}:{dest[1]}")
-        send_msg(conn, {'status': 'ok'})
+        send_msg(conn, {'status': 'ok'}) # reply to previous hop only after successfully connecting to the destination
 
     else:
-        # ── Entry or middle node ──
+        # ENTRY OR MIDDLE NODE
         next_host = inner['next_host']
         next_port = inner['next_port']
         forward_payload = inner['forward_payload']  # already a dict for next hop
 
-        try:
+        try: # open the socket to the next hop
             next_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             next_sock.connect((next_host, next_port))
         except Exception as e:
@@ -350,7 +348,7 @@ def handle_circuit_setup(conn, msg, local_circuits: set):
             return
 
         # Generate a fresh circuit ID for the outgoing link so each hop uses a
-        # different identifier — an observer watching two links cannot correlate
+        # different identifier, an observer watching two links cannot correlate
         # packets by circuit_id.
         next_circuit_id = str(uuid.uuid4())
 
@@ -361,18 +359,22 @@ def handle_circuit_setup(conn, msg, local_circuits: set):
             'payload': forward_payload,
         })
 
+        # Wait for the next hop to reply before responding to the previous hop,
+        # this ensures the whole path is valid before the client gets an 'ok'.
         resp_raw = recv_msg(next_sock)
-        if resp_raw is None:
+        if resp_raw is None: # next hop disconnected during setup
             send_msg(conn, {'status': 'error', 'msg': 'Next hop disconnected during setup'})
             next_sock.close()
             return
 
         resp = json.loads(resp_raw)
+        # If the next hop returns an error, propagate it back immediately.
         if resp.get('status') != 'ok':
             send_msg(conn, resp)
             next_sock.close()
             return
 
+        # Store the circuit with is_exit=False and no dest_sock, we'll forward RELAY messages to next_sock.
         with circuits_lock:
             circuits[circuit_id] = {
                 'key': relay_key,
@@ -381,27 +383,27 @@ def handle_circuit_setup(conn, msg, local_circuits: set):
                 'dest': None,
                 'is_exit': False,
             }
-        local_circuits.add(circuit_id)
+        local_circuits.add(circuit_id) # track this circuit for cleanup on disconnect
         print(f"[{node_type.upper()}] Circuit {circuit_id[:8]}  next={next_host}:{next_port}")
         send_msg(conn, {'status': 'ok'})
 
 
 def handle_relay(conn, msg):
     """
-    Handle one RELAY message — peel one encryption layer, forward, re-wrap response.
+    Handle one RELAY message: peel one encryption layer, forward, re-wrap response.
 
     How it works:
         Looks up the circuit by circuit_id. If the circuit is unknown (already
         torn down or never set up), returns an error immediately.
 
         Decrypts the base64-encoded 'data' field with this node's relay_key
-        (aes_decrypt) — this removes exactly one layer of the onion.
+        (aes_decrypt), this removes exactly one layer of the onion.
 
         Then branches on is_exit:
 
         EXIT path:
-            The decrypted bytes are the *plaintext* payload for the destination
-            server — unless they are empty, which signals a *poll* (the client
+            The decrypted bytes are the plaintext payload for the destination
+            server, unless they are empty, which signals a poll (the client
             asking "do you have any pushed messages for me?").
 
             Non-empty: sends the plaintext to dest_sock via send_msg, then uses
@@ -426,7 +428,7 @@ def handle_relay(conn, msg):
 
             This re-wrapping is what makes the backward path "add layers": the
             exit node wraps with K3, middle wraps with K2, entry wraps with K1,
-            and the client peels them in reverse order (K1 → K2 → K3).
+            and the client peels them in reverse order (K1 -> K2 -> K3).
 
     Why it exists:
         This is the core of onion routing during live message exchange. The
@@ -441,7 +443,7 @@ def handle_relay(conn, msg):
     """
     circuit_id = msg['circuit_id']
 
-    with circuits_lock:
+    with circuits_lock: # look up the circuit, if it doesn't exist return an error immediately
         circuit = circuits.get(circuit_id)
 
     if not circuit:
@@ -451,7 +453,7 @@ def handle_relay(conn, msg):
 
     relay_key = circuit['key']
 
-    encrypted_blob = base64.b64decode(msg['data'])
+    encrypted_blob = base64.b64decode(msg['data']) # this is the onion layer addressed to this node, still encrypted
     dbg("recv  (still encrypted)", encrypted_blob)
 
     # Peel one onion layer
@@ -459,9 +461,9 @@ def handle_relay(conn, msg):
     dbg("after peel             ", decrypted)
 
     if circuit['is_exit']:
-        # ── Exit: deliver via persistent destination connection ──
+        # EXIT NODE: decrypted is the plaintext for the destination server, or empty for poll.
         # Empty decrypted = poll (check for pushed messages without sending).
-        # Non-empty = real message; send to dest then wait for response.
+        # Non-empty = real message, send to dest then wait for response.
         dest_sock = circuit['dest_sock']
 
         if decrypted:
@@ -470,12 +472,12 @@ def handle_relay(conn, msg):
                 print(f"  [DBG] plaintext text:              {decrypted.decode(errors='replace')!r}")
 
         try:
-            if decrypted:
+            if decrypted: # only send to the server if this is a real message, not a poll
                 send_msg(dest_sock, decrypted)
-            # Longer timeout for real messages (waiting for Ack); short for polls.
+            # Longer timeout for real messages (waiting for Ack), short for polls.
             timeout = 5.0 if decrypted else 0.5
             readable, _, _ = select.select([dest_sock], [], [], timeout)
-            if readable:
+            if readable: # server sent a response within the timeout, read it, otherwise treat as no response (empty) to return to client
                 raw_response = recv_msg(dest_sock)
                 if raw_response is None:
                     raw_response = b''
@@ -484,7 +486,7 @@ def handle_relay(conn, msg):
         except Exception as e:
             raw_response = f'DELIVERY ERROR: {e}'.encode()
 
-        if raw_response:
+        if raw_response: # non-empty response from the server, log it in debug mode and show a preview
             dbg("server response (raw)  ", raw_response)
             print(f"[{node_type.upper()}] Delivered  circuit={circuit_id[:8]}")
 
@@ -498,7 +500,7 @@ def handle_relay(conn, msg):
         })
 
     else:
-        # ── Entry / middle: forward with one layer removed ──
+       # ENTRY OR MIDDLE NODE: forward to next hop, wait for response, re-wrap with AES and send back to previous hop.
         next_sock = circuit['next_sock']
         send_msg(next_sock, {
             'type': 'RELAY',
@@ -506,13 +508,14 @@ def handle_relay(conn, msg):
             'data': base64.b64encode(decrypted).decode(),
         })
 
+        # Wait for the next hop's response, if the next hop disconnects or returns an error, propagate that back immediately.
         resp_raw = recv_msg(next_sock)
         if resp_raw is None:
             send_msg(conn, {'type': 'RELAY_RESPONSE', 'circuit_id': circuit_id,
                             'error': 'next hop disconnected'})
             return
 
-        resp = json.loads(resp_raw)
+        resp = json.loads(resp_raw) # expecting {'type': 'RELAY_RESPONSE', 'circuit_id': ..., 'data': ...} or {'error': ...}
         if 'error' in resp:
             send_msg(conn, resp)
             return
@@ -531,7 +534,7 @@ def handle_relay(conn, msg):
         })
 
 
-# ── Connection loop ───────────────────────────────────────────────────────────
+# Connection Loop
 
 def handle_connection(conn, addr):
     """
@@ -544,14 +547,14 @@ def handle_connection(conn, addr):
         disconnected) or an exception is raised.
 
         The `local_circuits` set tracks every circuit_id that was established
-        over *this specific connection*. One TCP connection can carry multiple
+        over this specific connection. One TCP connection can carry multiple
         circuits (if the same client opens several), so we need per-connection
         accounting to know what to clean up.
 
         The finally block is the teardown cascade:
             1. conn.close() — tells the previous hop the connection is dead.
             2. For each local circuit: pops it from `circuits`, closes next_sock
-               if present. Closing next_sock causes the *next* node's recv_msg
+               if present. Closing next_sock causes the next node's recv_msg
                to return None, which triggers that node's own finally block.
                This cascade propagates automatically all the way to the exit
                node, which then closes dest_sock and disconnects from the
@@ -567,11 +570,11 @@ def handle_connection(conn, addr):
         conn — accepted TCP socket from the previous hop or the client.
         addr — (host, port) of the connecting party, used for logging.
     """
-    local_circuits: set = set()
-    try:
+    local_circuits: set = set() # track circuit_ids established over this connection for cleanup on disconnect
+    try: # main read loop: recv_msg, parse JSON, dispatch to handlers based on 'type'
         while True:
             raw = recv_msg(conn)
-            if raw is None:
+            if raw is None: # clean disconnect from the client
                 break
             msg = json.loads(raw)
             t = msg.get('type')
@@ -611,7 +614,7 @@ def handle_connection(conn, addr):
             print(f"[{node_type.upper()}] Torn down {len(local_circuits)} circuit(s) from {addr}")
 
 
-# ── Directory registration ────────────────────────────────────────────────────
+# Directory Registration
 
 def register_with_directory(dir_host, dir_port, n_type, host, port, pub_pem):
     """
@@ -620,11 +623,11 @@ def register_with_directory(dir_host, dir_port, n_type, host, port, pub_pem):
     How it works:
         Opens a short-lived TCP connection to the directory server and sends a
         REGISTER message containing this node's type, address, and RSA public
-        key (PEM string). The directory server upserts the entry (removing any
+        key (PEM string). The directory server adds the entry (removing any
         stale record for the same host:port) and replies {'status': 'ok'}.
 
         If registration fails (directory unreachable or returns an error),
-        RuntimeError is raised and main() will exit — a node that cannot
+        RuntimeError is raised and main() will exit. a node that cannot
         register is not discoverable by clients and cannot participate in any
         circuit.
 
@@ -660,11 +663,11 @@ def register_with_directory(dir_host, dir_port, n_type, host, port, pub_pem):
         raise RuntimeError(f"Registration failed: {resp}")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# Entry Point
 
 def main():
     """
-    Entry point — initialise node state, register, bind, and accept connections.
+    Entry point: initialise node state, register, bind, and accept connections.
 
     How it works:
         1. Parses --type (required: entry/middle/exit), --host, --port,
@@ -675,7 +678,7 @@ def main():
            They are set before any thread starts, so no lock is needed.
 
         3. Generates an RSA-2048 key pair. This is the most time-consuming step
-           (~0.5–2 s). The private key is stored in the global `rsa_key`;
+           (~0.5–2 s). The private key is stored in the global `rsa_key`,
            only the public key is shared (sent to the directory server and from
            there to clients during circuit building).
 
@@ -692,14 +695,15 @@ def main():
            because the threads are daemon threads and are killed immediately).
 
     Why it exists:
-        All global mutable state (rsa_key, node_type, debug, circuits) is
-        set up here before the accept loop starts. Doing it in main() rather
-        than at module level means restarting the process regenerates the RSA
-        key, giving each run a fresh identity — consistent with the ephemeral
-        nature of the relay nodes.
+        All global variables (rsa_key, node_type, debug, circuits) are
+        set up here before the accept loop starts. The accept loop is the main server loop,
+        and handle_connection is the per-connection thread function.
+        The separation of concerns keeps the code organized and makes it clear
+        where state is initialized and how the server operates.
     """
     global rsa_key, node_type, debug
 
+    # Command-line argument parsing
     parser = argparse.ArgumentParser(description='Onion Router Node')
     parser.add_argument('--type', required=True, choices=['entry', 'middle', 'exit'],
                         help='Role of this node in the circuit')
@@ -716,6 +720,7 @@ def main():
     if debug:
         print(f"[{node_type.upper()}] Debug mode ON")
 
+    # Registration and key generation
     print(f"[{node_type.upper()}] Generating RSA-2048 key pair...")
     rsa_key = RSA.generate(2048)
     pub_pem = rsa_key.publickey().export_key().decode()
@@ -723,6 +728,7 @@ def main():
     register_with_directory(args.dir_host, args.dir_port,
                             node_type, args.host, args.port, pub_pem)
 
+    # Bind and listen
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server_sock.bind((args.host, args.port))
@@ -730,7 +736,7 @@ def main():
     server_sock.settimeout(1.0)
     print(f"[{node_type.upper()}] Listening on {args.host}:{args.port}")
 
-    try:
+    try: # accept loop: on each connection, start a new thread running handle_connection
         while True:
             try:
                 conn, addr = server_sock.accept()
@@ -740,7 +746,7 @@ def main():
             t.start()
     except KeyboardInterrupt:
         print(f"\n[{node_type.upper()}] Shutting down...")
-    finally:
+    finally: # close all remaining sockets in circuits, this handles any circuits that were still open at shutdown time (handle_connection's finally won't run because the threads are daemon threads and are killed immediately)
         with circuits_lock:
             for circuit in circuits.values():
                 if circuit['next_sock']:

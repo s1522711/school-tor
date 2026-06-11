@@ -1,21 +1,5 @@
-"""
-GUI Chat Client
-===============
-CustomTkinter front-end for the onion chat server.
-
-Requirements:
-    pip install customtkinter pycryptodome
-
-Usage:
-    python client/main.py
-"""
-
 import sys
 import os
-
-# Allow sibling imports when run as `python client/main.py` from the repo root
-sys.path.insert(0, os.path.dirname(__file__))
-
 import customtkinter as ctk
 from network import Connection
 from home_screen import HomeScreen
@@ -54,7 +38,7 @@ class App(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.show_home()
 
-    # ── Screen switching ──────────────────────────────────────────────────────
+    # Screen Switching
 
     def show_home(self, conn: Connection | None = None):
         """
@@ -159,7 +143,7 @@ class App(ctk.CTk):
         Handle the OS window-close event (WM_DELETE_WINDOW).
 
         How it works:
-            Closes the current Connection if one exists — this stops the
+            Closes the current Connection if one exists: this stops the
             background receiver thread, closes the TCP socket (or entry-node
             socket for Tor circuits), and triggers cascade teardown of the
             relay chain. Then calls self.destroy() to close the Tk window and

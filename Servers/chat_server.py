@@ -2,7 +2,7 @@
 Chat Server
 
 Manages chat rooms over the onion network. Clients connect through their own
-Tor circuit; this server only sees the exit node's address, not the real client.
+Tor circuit, this server only sees the exit node's address, not the real client.
 
 Rooms are identified by a UUID. Each connection belongs to at most one room.
 
@@ -15,11 +15,11 @@ Protocol  (see protocol.md):
     Body:   {"type": "MessageType", "data": {...}}
 
 Architecture:
-    ChatServer          — TCP accept loop; spawns one thread per connection
-    ChatMessageHandler  — stateless dispatcher; routes messages to UserManager
+    ChatServer          — TCP accept loop, spawns one thread per connection
+    ChatMessageHandler  — stateless dispatcher, routes messages to UserManager
     UserManager         — all room/user logic, purely in-memory
     Room                — in-memory socket store for one room (conn -> username)
-    Database            — SQLite, stats only; rooms and users never touch the DB
+    Database            — SQLite, stats only, rooms and users never touch the DB
 """
 
 import socket
@@ -31,7 +31,7 @@ import sqlite3
 import os
 
 
-# ── Wire helpers ──────────────────────────────────────────────────────────────
+# comm helpers
 
 def recv_msg(sock):
     """
@@ -39,7 +39,7 @@ def recv_msg(sock):
 
     How it works:
         Reads a 4-byte big-endian header to learn the payload size, then reads
-        exactly that many bytes — looping in both cases because a single recv()
+        exactly that many bytes, looping in both cases because a single recv()
         call on a TCP stream can return fewer bytes than requested.
         Returns None on clean EOF (the client disconnected).
 
@@ -53,14 +53,14 @@ def recv_msg(sock):
         bytes — the raw JSON payload, or None if the socket closed.
     """
     header = b''
-    while len(header) < 4:
+    while len(header) < 4: # loop until we have the full 4-byte header
         chunk = sock.recv(4 - len(header))
         if not chunk:
             return None
         header += chunk
-    length = int.from_bytes(header, 'big')
+    length = int.from_bytes(header, 'big') # parse the length from the header
     data = b''
-    while len(data) < length:
+    while len(data) < length: # loop until we have the full payload
         chunk = sock.recv(length - len(data))
         if not chunk:
             return None
@@ -73,7 +73,7 @@ def send_msg(sock, data):
     Send data over TCP with a 4-byte big-endian length prefix.
 
     How it works:
-        Accepts dict (→ JSON bytes), str (→ UTF-8 bytes), or raw bytes.
+        Accepts dict (JSON bytes), str (UTF-8 bytes), or raw bytes.
         Prepends the 4-byte length and calls sendall() which loops until all
         bytes have been handed to the kernel, even if the send buffer is full.
 
@@ -83,9 +83,9 @@ def send_msg(sock, data):
         buffer could cause send() to write only a partial payload without
         raising an exception, silently corrupting the stream.
     """
-    if isinstance(data, dict):
+    if isinstance(data, dict): # convert dict to JSON bytes
         data = json.dumps(data).encode()
-    elif isinstance(data, str):
+    elif isinstance(data, str): # convert str to UTF-8 bytes
         data = data.encode()
     sock.sendall(len(data).to_bytes(4, 'big') + data)
 
@@ -141,7 +141,7 @@ def send_error(sock, message: str):
     send_to(sock, 'Error', {'error_message': message})
 
 
-# ── Database ──────────────────────────────────────────────────────────────────
+# Database
 
 class Database:
     """
@@ -149,9 +149,9 @@ class Database:
 
     Schema
     ------
-    stats — one row per counter key; survives server restarts.
+    stats — one row per counter key, survives server restarts.
 
-    Rooms and users are never stored here; they live purely in UserManager's
+    Rooms and users are never stored here, they live purely in UserManager's
     in-memory dicts and are lost on restart (sockets are gone anyway).
 
     All public methods are thread-safe via a single internal lock.
@@ -159,6 +159,7 @@ class Database:
     the lock serialises all access.
     """
 
+    # the keys of the stats we track, these are seeded in _init_schema and must be present for the server to run
     _STAT_KEYS = ('total_messages', 'total_files', 'total_users', 'total_rooms')
 
     def __init__(self, path: str):
@@ -168,7 +169,7 @@ class Database:
         How it works:
             sqlite3.connect() creates the file if it does not exist.
             check_same_thread=False allows the single connection object to be
-            shared by multiple worker threads; correctness is maintained by the
+            shared by multiple worker threads, correctness is maintained by the
             _lock that serialises every SQL operation.
             row_factory=sqlite3.Row makes fetchall() return Row objects that
             can be accessed by column name (row['key']) rather than by index.
@@ -196,7 +197,7 @@ class Database:
         Create the stats table if it does not exist and seed all known keys.
 
         How it works:
-            CREATE TABLE IF NOT EXISTS is idempotent — safe to call on every
+            CREATE TABLE IF NOT EXISTS is safe to call on every
             startup whether the DB is new or existing.
             INSERT OR IGNORE seeds each stat key with value=0 only if the key
             is not already present, preserving accumulated counts across restarts.
@@ -209,14 +210,14 @@ class Database:
             within the lock to avoid any race with concurrent worker threads
             that might try to read stats before the table exists.
         """
-        with self._lock:
+        with self._lock: # lock the critical section that creates the table and seeds the keys
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS stats (
                     key   TEXT PRIMARY KEY,
                     value INTEGER NOT NULL DEFAULT 0
                 )
             """)
-            for key in self._STAT_KEYS:
+            for key in self._STAT_KEYS: # ensure every stat key has a row (with value=0 if newly created)
                 self._conn.execute(
                     "INSERT OR IGNORE INTO stats (key, value) VALUES (?, 0)", (key,)
                 )
@@ -229,21 +230,20 @@ class Database:
 
         How it works:
             Executes UPDATE stats SET value = value + 1 WHERE key = ? for each
-            key inside the _lock. Using SQL arithmetic (value + 1) rather than
-            a read-modify-write in Python is a single atomic operation in SQLite,
+            key inside the _lock. Using SQL arithmetic (value + 1) while also
             avoiding races between concurrent threads. All increments for one call
             share a single commit() for efficiency.
 
         Why it exists:
             Called whenever a significant event occurs: a room is created, a user
             joins, a message or file is sent. Incrementing in the DB rather than
-            memory means the totals are durable — a server crash between events
+            memory means the totals are durable, a server crash between events
             loses at most the current call, not all accumulated history.
 
         Args:
             *keys — one or more stat key strings (must be in _STAT_KEYS).
         """
-        with self._lock:
+        with self._lock: # lock the critical section that updates the stats
             for key in keys:
                 self._conn.execute(
                     "UPDATE stats SET value = value + 1 WHERE key = ?", (key,)
@@ -257,8 +257,8 @@ class Database:
         How it works:
             Executes SELECT key, value FROM stats under the lock, then converts
             the list of Row objects to a {key: value} dict outside the lock.
-            The dict is transient — it exists only long enough to be serialised
-            and sent to the requesting client.
+            The dict exists only long enough to be serialised and sent
+            to the requesting client.
 
         Why it exists:
             Stats are always read from the DB, not from an in-memory cache. This
@@ -274,13 +274,12 @@ class Database:
         return {row['key']: row['value'] for row in rows}
 
 
-# ── Room ──────────────────────────────────────────────────────────────────────
+# Room
 
 class Room:
     """
     In-memory socket store for one active room.
-    The DB holds the authoritative member list; this object holds the sockets
-    needed to actually send messages to those members.
+    it stores the room_code (for display and JOIN validation) and a clients dict
 
     clients: dict[socket, str]  — conn -> username
     """
@@ -291,8 +290,7 @@ class Room:
 
         How it works:
             Stores the room_code (used for display and JOIN validation) and an
-            empty clients dict that maps socket → username. Both fields are set
-            here; no DB interaction happens at construction time.
+            empty clients dict that maps socket to username.
 
         Why it exists:
             Rooms are created dynamically when a user sends CreateRoom. Keeping
@@ -308,7 +306,7 @@ class Room:
 
     def add(self, conn, username: str):
         """
-        Add a client socket → username mapping to this room.
+        Add a client socket to username mapping to this room.
 
         How it works:
             Simple dict assignment. The caller (UserManager) is responsible for
@@ -316,7 +314,7 @@ class Room:
             synchronisation is needed inside Room itself.
 
         Why it exists:
-            Centralises the mutation so UserManager does not need to know the
+            Centralises the changes so UserManager does not need to know the
             internal structure of Room.
 
         Args:
@@ -331,11 +329,11 @@ class Room:
 
         How it works:
             dict.pop(conn, None) silently does nothing if conn is not in the
-            dict, avoiding a KeyError on double-remove (e.g., leave + disconnect).
+            dict, avoiding a KeyError on double-remove (e.g. leave + disconnect).
 
         Why it exists:
             Called from UserManager.leave_room which may itself be called both
-            on a voluntary /leave and in the _handle_connection finally block.
+            on a voluntary leave and in the _handle_connection finally block.
             Using pop(..., None) makes it safe to call twice without checking.
 
         Args:
@@ -369,7 +367,7 @@ class Room:
         Return a snapshot list of all connections except exclude_conn.
 
         How it works:
-            List comprehension over self.clients — takes a snapshot of the
+            List comprehension over self.clients, takes a snapshot of the
             current connections at the moment of the call. The snapshot is
             important: if we iterated over self.clients while sending (which
             happens outside the lock), a concurrent join or leave could modify
@@ -400,8 +398,7 @@ class Room:
 
         Why it exists:
             After a leave_room call, if the room is empty it is deleted from
-            UserManager._rooms to prevent accumulating ghost rooms. This
-            predicate makes that check readable.
+            UserManager._rooms to prevent accumulating ghost rooms.
 
         Returns:
             bool — True if the room has no members.
@@ -409,14 +406,14 @@ class Room:
         return len(self.clients) == 0
 
 
-# ── UserManager ───────────────────────────────────────────────────────────────
+# UserManager
 
 class UserManager:
     """
-    Manages rooms and users entirely in memory.
+    Manages rooms and users
 
-    The Database is only consulted for stats (increment and read).
-    Rooms and users are never written to or read from the DB; they exist only
+    The Database is only used for stats (increment and read).
+    Rooms and users are never written to or read from the DB, they exist only
     for the lifetime of the server process.
 
     _lock serialises every join/leave/create so in-memory state stays consistent.
@@ -425,11 +422,11 @@ class UserManager:
 
     def __init__(self, db: Database):
         """
-        Initialise an empty manager backed by the given Database for stats.
+        Initialise an empty manager using the given Database for stats.
 
         How it works:
-            Sets up two dicts: _rooms maps room_code → Room, and _conn_room maps
-            client socket → room_code. These two views allow O(1) lookup in both
+            Sets up two dicts: _rooms maps room_code -> Room, and _conn_room maps
+            client socket -> room_code. These two views allow quick lookup in both
             directions. A single threading.Lock() (_lock) protects both dicts.
 
         Why it exists:
@@ -445,8 +442,7 @@ class UserManager:
         self._conn_room: dict[object, str] = {} # conn -> room_code
         self._lock = threading.Lock()
 
-    # ── Room lookup ───────────────────────────────────────────────────────────
-
+    # room lookups
     def get_room_of(self, conn) -> str | None:
         """
         Return the room_code of the room conn is in, or None.
@@ -484,7 +480,7 @@ class UserManager:
         Why it exists:
             SendMessage and SendFile need to include the sender's username in the
             broadcast (IncomingMessage.from_username). The username is stored in
-            the Room object, so we need to traverse conn → room_code → Room →
+            the Room object, so we need to traverse conn -> room_code -> Room ->
             username.
 
         Args:
@@ -493,15 +489,14 @@ class UserManager:
         Returns:
             str — the username, or None.
         """
-        with self._lock:
-            rc = self._conn_room.get(conn)
+        with self._lock: # lock the critical section that looks up the room and username
+            rc = self._conn_room.get(conn) # lookup the room code for this connection
             if rc is None:
                 return None
-            room = self._rooms.get(rc)
+            room = self._rooms.get(rc) # lookup the Room object for this room code
             return room.get_username(conn) if room else None
-
-    # ── Create ────────────────────────────────────────────────────────────────
-
+        
+    # creation
     def create_room(self, conn, username: str) -> tuple[str, list[str]]:
         """
         Create a new room, add the creator, return (room_code, member_list).
@@ -512,7 +507,7 @@ class UserManager:
                 1. Checks that conn is not already in _conn_room (can't be in
                    two rooms simultaneously).
                 2. Generates a UUID room code. UUID4 is random and practically
-                   collision-free — two simultaneous creates will get different
+                   collision-free, two simultaneous creates will get different
                    codes.
                 3. Creates a Room, adds the creator, registers in both dicts.
                 4. Takes a snapshot of the member list (just the creator at this
@@ -524,7 +519,7 @@ class UserManager:
         Why the DB increment is outside the lock:
             DB I/O under the user lock would mean that a slow disk write could
             stall other threads trying to join or leave rooms. The lock guards
-            in-memory state only; the DB has its own internal lock.
+            in-memory state only, the DB has its own internal lock.
 
         Args:
             conn     — the client socket (the room creator).
@@ -537,12 +532,12 @@ class UserManager:
         Raises:
             ValueError — if conn is already in a room.
         """
-        with self._lock:
+        with self._lock: # lock the critical section that creates the room and updates the state
             if conn in self._conn_room:
                 raise ValueError('Already in a room — leave first')
             room_code = str(uuid.uuid4())
             room = Room(room_code)
-            room.add(conn, username)
+            room.add(conn, username) # add the creator to the room's clients dict
             self._rooms[room_code] = room
             self._conn_room[conn] = room_code
             members = list(room.clients.values())
@@ -551,8 +546,7 @@ class UserManager:
         print(f"[CHAT] {username!r} created room {room_code}")
         return room_code, members
 
-    # ── Join ──────────────────────────────────────────────────────────────────
-
+    # joining
     def join_room(self, conn, room_code: str, username: str) -> tuple[list[str], list]:
         """
         Add conn to an existing room.
@@ -562,11 +556,11 @@ class UserManager:
         How it works:
             Under the lock:
                 1. Checks conn is not already in a room.
-                2. Looks up the Room by room_code; raises ValueError if not found.
-                3. Checks that the requested username is not already taken in this
+                2. Looks up the Room by room_code, raises ValueError if not found.
+                3. Checks that the requested username is not taken already in this
                    room (compares against room.clients.values()).
                 4. Takes a snapshot of `others` (existing members) before adding
-                   the new user — this is the list that will receive UserJoined.
+                   the new user, this is the list that will receive UserJoined.
                 5. Adds the new user and updates _conn_room.
                 6. Takes a snapshot of the full member list (including the new
                    user) to return to the caller for the RoomJoined response.
@@ -578,7 +572,7 @@ class UserManager:
             The caller (ChatMessageHandler._join_room) will send UserJoined to
             'others' and RoomJoined (with the full member list) to conn. If we
             added the new user before snapshotting others, the new user's socket
-            would be in the list and would receive a spurious UserJoined about
+            would be in the list and would receive a wrong UserJoined about
             themselves.
 
         Args:
@@ -593,25 +587,24 @@ class UserManager:
         Raises:
             ValueError — room does not exist, or username is taken.
         """
-        with self._lock:
+        with self._lock: # lock the critical section that adds the user to the room and updates the state
             if conn in self._conn_room:
                 raise ValueError('Already in a room — leave first')
-            room = self._rooms.get(room_code)
+            room = self._rooms.get(room_code) # lookup the Room object for this room code, or None if not found
             if room is None:
                 raise ValueError(f'Room {room_code!r} does not exist')
-            if username in room.clients.values():
+            if username in room.clients.values(): # check if the username is already taken in this room
                 raise ValueError(f'Username {username!r} is already taken in that room')
-            others = room.others()
+            others = room.others() # snapshot of existing members before adding the new user
             room.add(conn, username)
-            self._conn_room[conn] = room_code
-            members = list(room.clients.values())
+            self._conn_room[conn] = room_code # register the new user's connection in _conn_room
+            members = list(room.clients.values()) # snapshot of the full member list including the new user
 
         self.db.increment_stat('total_users')
         print(f"[CHAT] {username!r} joined room {room_code}")
         return members, others
 
-    # ── Leave ─────────────────────────────────────────────────────────────────
-
+    # leaving
     def leave_room(self, conn, notify_self: bool = True):
         """
         Remove conn from its room. Broadcasts UserLeft to remaining members.
@@ -619,8 +612,8 @@ class UserManager:
 
         How it works:
             Under the lock:
-                1. Looks up the room_code for conn; returns immediately if conn
-                   is not in any room (idempotent).
+                1. Looks up the room_code for conn, returns immediately if conn
+                   is not in any room.
                 2. Removes conn from the Room and from _conn_room.
                 3. Snapshots `others` (the remaining members).
                 4. If the room is now empty, deletes it from _rooms to avoid
@@ -640,31 +633,32 @@ class UserManager:
 
         Args:
             conn        — the leaving client's socket.
-            notify_self — if True, send RoomLeft to conn (voluntary leave);
+            notify_self — if True, send RoomLeft to conn (voluntary leave),
                           if False, skip (called from the finally on disconnect).
         """
-        with self._lock:
-            room_code = self._conn_room.get(conn)
+        with self._lock: # lock the critical section that removes the user from the room and updates the state
+            room_code = self._conn_room.get(conn) # lookup the room code for this connection, or None if not found
             if room_code is None:
                 return
-            room = self._rooms[room_code]
+            room = self._rooms[room_code] # lookup the Room object for this room code
             username = room.get_username(conn)
-            room.remove(conn)
-            del self._conn_room[conn]
+            room.remove(conn) # remove the connection from the room's clients dict
+            del self._conn_room[conn] # remove the connection from _conn_room
             others = room.others()
-            if room.is_empty():
+            if room.is_empty(): # if the room has no more members, delete it from _rooms to prevent ghost rooms
                 del self._rooms[room_code]
 
+        # Notify the remaining members that this user has left
         for other_conn in others:
             send_to(other_conn, 'UserLeft', {'username': username, 'room_code': room_code})
 
+        # Notify the leaving client if this is a voluntary leave (notify_self=True).
         if notify_self:
             send_to(conn, 'RoomLeft', {'room_code': room_code})
 
         print(f"[CHAT] {username!r} left room {room_code}")
 
-    # ── Broadcast ─────────────────────────────────────────────────────────────
-
+    # Broadcast
     def broadcast(self, conn, msg_type: str, data: dict):
         """
         Send a message to all room members except conn.
@@ -687,17 +681,18 @@ class UserManager:
             msg_type — 'IncomingMessage' or 'IncomingFile'.
             data     — the message payload dict.
         """
-        with self._lock:
+        with self._lock: # lock the critical section that looks up the room and snapshots the targets
             room_code = self._conn_room.get(conn)
             if room_code is None:
                 return
             targets = self._rooms[room_code].others(exclude_conn=conn)
 
+        # send to the targets outside the lock so a slow/broken client doesn't block others
         for target in targets:
             send_to(target, msg_type, data)
 
 
-# ── ChatMessageHandler ────────────────────────────────────────────────────────
+# ChatMessageHandler
 
 class ChatMessageHandler:
     """
@@ -711,13 +706,14 @@ class ChatMessageHandler:
 
         How it works:
             Stores a reference to user_manager as self.um. The handler is
-            stateless — it holds no per-connection state itself; all state
+            stateless, it holds no per-connection state itself, all state
             lives in UserManager and Room.
 
         Why it exists:
             Separating the dispatcher (which parses message types) from the
-            business logic (UserManager) follows the single-responsibility
-            principle and makes unit-testing each layer independently easier.
+            business logic (UserManager) makes the code cleaner and more modular.
+            if a new message type is added to the protocol, only this class and one
+            new method needs to change.
 
         Args:
             user_manager — the shared UserManager instance.
@@ -726,13 +722,13 @@ class ChatMessageHandler:
 
     def handle(self, conn, msg_type: str, data: dict):
         """
-        Route one incoming message to the correct private handler method.
+        Route one incoming message to the correct handler method.
 
         How it works:
-            A series of if/elif branches maps the 'type' string to a private
-            _method. Unknown types produce an Error response. This is intentionally
+            A series of if/elif branches maps the 'type' string to a _method.
+            Unknown types produce an Error response. This is intentionally
             a flat dispatcher (not a dict of callables) so the control flow is
-            visible without indirection.
+            visible easily in one place.
 
         Why it exists:
             Isolates the switch logic from the implementation of each handler.
@@ -764,9 +760,9 @@ class ChatMessageHandler:
         Validate and execute a CreateRoom request.
 
         How it works:
-            Strips and validates the 'my_username' field — empty usernames are
-            rejected immediately. Calls um.create_room() which does the actual
-            state mutation and DB increment. On success sends RoomCreated with
+            Strips and validates the 'my_username' field, empty usernames are
+            rejected immediately. Calls um.create_room() which does the room
+            creation and DB increment. On success sends RoomCreated with
             the new room_code and the initial member list (just the creator).
             On ValueError (already in a room) sends an Error.
 
@@ -780,7 +776,7 @@ class ChatMessageHandler:
             conn — the client socket.
             data — {'my_username': str}.
         """
-        username = data.get('my_username', '').strip()
+        username = data.get('my_username', '').strip() # strip whitespace and default to empty string if missing
         if not username:
             send_error(conn, 'my_username is required')
             return
@@ -789,6 +785,7 @@ class ChatMessageHandler:
         except ValueError as e:
             send_error(conn, str(e))
             return
+        # Notify the creator with the new room code and initial member list (just themselves).
         send_to(conn, 'RoomCreated', {'room_code': room_code, 'users': members})
 
     def _join_room(self, conn, data: dict):
@@ -815,7 +812,7 @@ class ChatMessageHandler:
         """
         room_code = data.get('room_code', '').strip()
         username  = data.get('my_username', '').strip()
-        if not room_code or not username:
+        if not room_code or not username: # validate at the boundary before calling business logic
             send_error(conn, 'room_code and my_username are required')
             return
         try:
@@ -838,10 +835,9 @@ class ChatMessageHandler:
             to the other members and RoomLeft to conn.
 
         Why it exists:
-            Voluntary leave (client sent /leave) differs from involuntary
-            disconnect (socket closed): voluntary leave notifies conn with
-            RoomLeft so the client UI can react cleanly. Involuntary disconnect
-            is handled in _handle_connection's finally block with
+            Voluntary leave differs from involuntary disconnect (socket closed):
+            voluntary leave notifies conn with RoomLeft so the client UI can react cleanly.
+            Involuntary disconnect is handled in _handle_connection's finally block with
             notify_self=False.
 
         Args:
@@ -921,24 +917,17 @@ class ChatMessageHandler:
         Read cumulative stats from the DB and send them to conn.
 
         How it works:
-            Calls db.get_stats() — a live DB read, not a cached value — and
-            wraps the result dict in a Stats message. No room membership check
-            is required: any connected client can query stats at any time.
-
-        Why it reads from DB (not memory):
-            Stats are the only information that must survive server restarts.
-            Reading directly from the DB ensures the response reflects the true
-            accumulated totals, including any that accumulated before the current
-            server process started.
+            Calls db.get_stats() and wraps the result dict in a Stats message.
+            No room membership check is required:
+            any connected client can query stats at any time.
 
         Args:
             conn — the requesting client's socket.
         """
-        # Stats are read directly from the DB — no in-memory cache
         send_to(conn, 'Stats', self.um.db.get_stats())
 
 
-# ── ChatServer ────────────────────────────────────────────────────────────────
+# ChatServer
 
 class ChatServer:
     def __init__(self, host: str, port: int, db_path: str):
@@ -952,8 +941,7 @@ class ChatServer:
 
         Why it exists:
             Separates construction (wiring together the components) from the
-            accept loop (start()). This makes it easy to instantiate the server
-            in tests without immediately binding a port.
+            accept loop (start()).
 
         Args:
             host    — IP address to bind (e.g. '0.0.0.0' or '127.0.0.1').
@@ -982,9 +970,9 @@ class ChatServer:
         Why it exists:
             This is the long-running server entry point. It needs to be in a
             separate method (not __init__) so the server can be fully initialised
-            before binding starts, and so tests can create a ChatServer without
-            accidentally starting a live server.
+            before binding starts.
         """
+        # Set up the server socket with SO_REUSEADDR and a timeout for graceful shutdown.
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind((self.host, self.port))
@@ -992,6 +980,7 @@ class ChatServer:
         srv.settimeout(1.0)
         print(f"[CHAT] Listening on {self.host}:{self.port}")
 
+        # Accept loop: spawn a new thread for each incoming connection.
         try:
             while True:
                 try:
@@ -1016,13 +1005,12 @@ class ChatServer:
             disconnect) or an exception is raised (network error).
 
             JSON decode errors are caught per-message and responded to with an
-            Error message, rather than killing the entire connection — a
-            malformed packet should not disconnect the client.
+            Error message, rather than killing the entire connection.
 
             The finally block calls leave_room(notify_self=False) to clean up
             any room membership when the socket closes, and closes the socket.
             notify_self=False is used because the socket is already dead (or
-            about to be) — attempting to write to it would raise an exception.
+            about to be), attempting to write to it would raise an exception.
 
         Why it exists:
             In a multi-threaded server, each connection must have its own thread
@@ -1035,26 +1023,27 @@ class ChatServer:
             addr — (host, port) of the client (only used for logging).
         """
         print(f"[CHAT] Connection from {addr}")
-        try:
-            while True:
+        try: # catch all exceptions to ensure the socket is closed and the user is removed from any room on error
+            while True: # read loop: recv_msg() returns None on clean disconnect, otherwise raises an exception on network error
                 raw = recv_msg(conn)
                 if raw is None:
                     break
-                try:
+                try: # parse the json per-message so a malformed message doesn't kill the connection
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
                     send_error(conn, 'Invalid JSON')
                     continue
+                # handle the message
                 self.handler.handle(conn, msg.get('type', ''), msg.get('data', {}))
         except Exception as e:
             print(f"[CHAT] Error from {addr}: {e}")
-        finally:
+        finally: # ensure cleanup on disconnect or error: remove from any room and close the socket
             self.handler.um.leave_room(conn, notify_self=False)
             conn.close()
             print(f"[CHAT] Disconnected {addr}")
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# Main entry point
 
 def main():
     """
@@ -1066,8 +1055,7 @@ def main():
         Creates a ChatServer and calls start(), which runs until Ctrl+C.
 
     Why it exists:
-        Separates argument parsing from server construction so ChatServer can
-        be imported and used programmatically without invoking argparse.
+        Separates argument parsing from server construction so that the main will be simplistic.
     """
     parser = argparse.ArgumentParser(description='Onion Chat Server')
     parser.add_argument('--host', default='0.0.0.0', help='Bind address')

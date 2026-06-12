@@ -26,7 +26,7 @@ end tell
 EOF
 }
 
-# ── Start infrastructure ───────────────────────────────────────────────────────
+# Start general servers
 
 launch "Dir-Server"  "uv run Servers/directory_server.py"
 sleep 1
@@ -34,7 +34,7 @@ sleep 1
 launch "Chat-Server" "uv run Servers/chat_server.py --port 8001"
 sleep 1
 
-# ── Start relay nodes ──────────────────────────────────────────────────────────
+# Start nodes
 # Entry:  ports 9001..900+N
 # Middle: ports 9101..910+N
 # Exit:   ports 9201..920+N
